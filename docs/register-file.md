@@ -11,13 +11,14 @@ In the Chisel design, the Register File module has the following IO ports:
 ### Inputs
 
 - `ROB_index` and `value`: value with validness indicator from CDB.
+- `register_index` and `value`: writeback value with validness indicator from ROB.
 - `tail`: ROB tail position, combined with
 - `destination`: of the issued instruction from IF, used to update tags.
 - `clear`: boolean clear signal from ROB.
 
 ### Outputs
 
-one set of the following for each functional unit, which means two sets, for ALU and LSB.
+one set of the following for each reservation station, which means two sets for ALU and LSB.
 
 - `rs1_value`: Value read from register rs1.
 - `rs1_tag`: Tag associated with rs1 (if not ready).
@@ -25,6 +26,8 @@ one set of the following for each functional unit, which means two sets, for ALU
 - `rs2_value`
 - `rs2_tag`
 - `rs2_valid`
+
+**Important note**: The description of the output is for understanding but not implementing. In Chisel, simply output the `Reg(Vec)` once for each reservation station. It is the design of the reservation station that guarantees there will be at most two reads per cycle, that is, only two MUX's will be generated.
 
 ## Inner Workings
 
@@ -41,8 +44,9 @@ The Register File consists of:
 ### Operation
 
 1. **Read Operations**: On read requests, returns the current value and tag.
-2. **CDB Monitoring**: Continuously checks CDB broadcasts. If the tag matches a register's tag, updates the value, sets tag to invalid.
-3. **Initialization**: On reset, all registers are set to zero, no tags. On clear, the tags all become invalid.
+2. **Writeback**: When the ROB commits a register write, change the value accordingly.
+3. **CDB Monitoring**: Continuously checks CDB broadcasts. If the tag matches a register's tag, updates the value, sets tag to invalid.
+4. **Initialization**: On reset, all registers are set to zero, no tags. On clear, the tags all become invalid.
 
 ## Implementation Details
 

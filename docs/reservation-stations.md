@@ -6,72 +6,61 @@ Reservation Stations are buffers associated with each functional unit in the Tom
 
 ## Ports
 
-In the Chisel implementation, each Reservation Station module would have the following IO ports. Note that there may be multiple instances (one per functional unit type).
+Each Reservation Station module have the following IO ports. Note that there may be multiple instances (one per functional unit type).
 
 ### Inputs
 
-- `clock`: Clock signal for synchronous operations.
 - `reset`: Reset signal to clear the station.
 - `issue_valid`: Boolean signal indicating a valid instruction is being issued to this station.
 - `issue_bits`: Bundle containing issue data:
   - `op`: Operation type (e.g., ADD, SUB).
-  - `dest_tag`: Tag for the destination (used for broadcasting results).
-  - `op1_valid`: Boolean indicating if operand 1 is ready.
-  - `op1_value`: Value of operand 1 (if ready).
-  - `op1_tag`: Tag for operand 1 (if not ready).
-  - `op2_valid`: Boolean for operand 2.
-  - `op2_value`: Value of operand 2.
-  - `op2_tag`: Tag for operand 2.
-  - `imm`: Immediate value (for certain operations).
+  - `op1_index`: Register index of operand 1.
+  - `op2_index`: Register index of operand 2, or
+  - `op2_value`: if operand 2 is an immediate.
+  - `op2_type`: a boolean indicator of which of the above is the case.
+  - `dest_tag`: Tag (ROB index) of the destination (from ROB, this is exactly the current queue tail).
 - `cdb_valid`: Boolean signal from the Common Data Bus indicating a result is available.
 - `cdb_tag`: Tag of the result on the CDB.
 - `cdb_value`: Value of the result on the CDB.
-- `fu_ready`: Boolean signal from the associated Functional Unit indicating it can start execution.
+- Values in ROB.
+- Values and tags in RF.
 
 ### Outputs
 
-- `busy`: Boolean signal indicating if the station is occupied.
-- `op_ready`: Boolean signal indicating both operands are ready and the station is ready to execute.
-- `exec_valid`: Boolean signal to the Functional Unit to start execution.
-- `exec_bits`: Bundle sent to the Functional Unit:
+- `issue_ready`: Boolean signal indicating if the station is ready for more instructions.
+- `exec_bits`: Bundle sent to the Functional Unit (with ready/valid protocol)
   - `op`: Operation type.
   - `op1`: Operand 1 value.
   - `op2`: Operand 2 value.
-  - `imm`: Immediate value.
-- `result_tag`: Tag associated with this station's result (for CDB broadcasting).
+  - `op3`: Operand 3 value(optional).
+  - `dest_tag`: Tag associated with this station's destination (for CDB broadcasting).
+
+Note that the LSB requires three parameters, but one of them - the offset - is always an immediate and the others are always register values. this means `op2_index` and `op2_value` can be both valid for the LSB, saving curcuit space.
 
 ## Inner Workings
 
 ### Structure
 
-Each Reservation Station contains:
+Each Reservation Station is a list of instructions that are handled by the same functional unit.
+The instructions have the following data members:
 
-- **Operation Field**: Stores the operation type.
-- **Operand Fields**: Two operand slots, each with:
-  - Valid bit: Indicates if the value is ready.
-  - Value: The actual data.
-  - Tag: Identifier of the station producing the value (if not ready).
-- **Destination Tag**: Unique identifier for this station's result.
-- **Busy Bit**: Indicates if the station is in use.
-- **Control Logic**: Finite state machine managing issue, wait, execute, and write-back states.
+- `valid`: Validness indicator.
+- `op`: Operation type.
+- `op1`: Operand 1 value with readiness indicator.
+- `op2`: Operand 2 value with readiness indicator.
+- `op1_tag`: Register tag of operand 1.
+- `op2_tag`: Register tag of operand 2.
+- `op3_tag`: Register tag of operand 3(optional).
+- `dest_tag`: Register tag of destination.
 
 ### Operation
 
-1. **Issue Phase**: When an instruction is issued, if the station is free (`busy` is false), the operation and operands are loaded. If operands are not ready, tags are stored instead of values.
+1. **Issue Phase**: When an instruction is issued, the operation and operands are loaded. If operands are not ready, tags are stored instead of values.
 2. **Waiting for Operands**: The station monitors the CDB. When a matching tag is broadcast, the corresponding operand is updated with the value and marked valid.
-3. **Execution Ready**: When both operands are valid and the Functional Unit is ready, `op_ready` is asserted, triggering execution.
+3. **Execution Ready**: When both operands are valid and the Functional Unit is ready, execution is triggered.
 4. **Execution**: The station sends operands to the Functional Unit and waits for completion.
-5. **Write-Back**: Upon completion, the result is broadcast on the CDB with the destination tag, and the station is freed.
-6. **Tag Matching**: The station compares incoming CDB tags with its operand tags; if matched, captures the value.
-
-### Key Features
-
-- **Register Renaming**: By using tags instead of register names, WAW and WAR hazards are eliminated.
-- **Parallelism**: Multiple stations can operate simultaneously, allowing out-of-order execution.
-- **Hazard Resolution**: RAW hazards are resolved by waiting for tagged operands via CDB broadcasts.
-- **Scalability**: The number of stations per functional unit type can be parameterized.
-
-This design enables the core dynamic scheduling capability of Tomasulo's algorithm, allowing instructions to execute as soon as their dependencies are satisfied.
+5. **Tag Matching**: The station compares incoming CDB tags with its operand tags; if matched, captures the value.
 
 ## Implementation Details
 
+When receiving an instruction, the station immediately tries to read its operand values according to the RF in the ROB. If a CDB broadcast is also received in the same cycle, the station also compares its ROB index with the ROB index of the input instruction. Otherwise this value would be effectively lost forever.

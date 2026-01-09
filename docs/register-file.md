@@ -10,10 +10,9 @@ In the Chisel design, the Register File module has the following IO ports:
 
 ### Inputs
 
-- `ROB_index` and `value`: value with validness indicator from CDB.
-- `register_index` and `value`: writeback value with validness indicator from ROB.
+- `register_index`, `tag` and `value`: writeback value with validness indicator from ROB.
 - `tail`: ROB tail position, combined with
-- `destination`: of the issued instruction from IF, used to update tags.
+- `destination`: of the issued instruction from IF with validness indicator, used to update tags.
 - `clear`: boolean clear signal from ROB.
 
 ### Outputs
@@ -39,15 +38,21 @@ The Register File consists of:
   - `value`: Current value.
   - `tag`: Tag of the station producing the next value (or invalid if ready).
   - `tag_valid`: Bit indicating if the tag is valid
-- **Read Ports**: Combinational logic for reading rs1 and rs2.
+- **Read Ports**: Combinational logic for reading rs1 and rs2. Again, this is actually implemented in reservation stations.
 
 ### Operation
 
 1. **Read Operations**: On read requests, returns the current value and tag.
-2. **Writeback**: When the ROB commits a register write, change the value accordingly.
-3. **CDB Monitoring**: Continuously checks CDB broadcasts. If the tag matches a register's tag, updates the value, sets tag to invalid.
-4. **Initialization**: On reset, all registers are set to zero, no tags. On clear, the tags all become invalid.
+2. **Bookkeeping**: When an instruction is issued, IF tells RF to update the corresponding register tag to RF tail.
+3. **Writeback**: When the ROB commits a register write, change the register value accordingly. If the bookkeeping tag is same as input from ROB, the tag becomes invalid.
+4. **Initialization**: On reset, all registers are set to zero, no tags. On clear, the tags all become invalid, while the register values remain.
 
 ## Implementation Details
 
-No penetration - read and monitor are separated. The corresponding functional unit is responsible for simultaneously reading from the register file and listening to CDB broadcasts.
+According to the RV32I instruction set, there are $32$ registers of four bytes each. Register zero is always zero, so its tag should always be invalid, the value being zero, ignoring all write instructions.
+
+Clear and writeback should not be valid at the same time, no need to worry.
+
+A register tag can be modified simultaneously by IF bookkeeping and ROB writeback, in which case IF bookkeeping has higher precedence, so it should be **after** ROB writeback by Chisel semantics.
+
+There is **NO** penetration, the read and write are seperate, because ROB and RF states are always synchronized when read by RS, and IF bookkeeping should take effect after RS read to deal with instructions like `xor rd rd rd`.

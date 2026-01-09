@@ -61,14 +61,18 @@ class CommonDataBusTest extends AnyFlatSpec with ChiselScalatestTester {
       c.io.alu.bits.index.poke(4.U)
       c.io.alu.bits.value.poke(101.U)
       c.clock.step(1)
-      // Should select LSB first (index 0)
+      // Should select LSB first (index 0), so lsb.ready = true, alu.ready = false
+      c.io.lsb.ready.expect(true.B)
+      c.io.alu.ready.expect(false.B)
       Seq(c.io.rs, c.io.rf, c.io.rob).foreach { consumer =>
         consumer.valid.expect(true.B)
         consumer.bits.index.expect(3.U)
         consumer.bits.value.expect(789.U)
       }
-      // Next cycle, should select ALU
+      // Next cycle, should select ALU, so lsb.ready = false, alu.ready = true
       c.clock.step(1)
+      c.io.lsb.ready.expect(false.B)
+      c.io.alu.ready.expect(true.B)
       Seq(c.io.rs, c.io.rf, c.io.rob).foreach { consumer =>
         consumer.valid.expect(true.B)
         consumer.bits.index.expect(4.U)

@@ -32,5 +32,9 @@ The CDB has a queue as buffer for each input to eliminate backpressure. The outp
 ## Implementation Details
 
 There are two separate input bundles, one from LSB and one from ALU with validness indicator. They then go through `ClearQueue`; the dequeue port is fed to the arbiter.
+
 There are three separate output bundles sharing the same output. The output has validness indicator but not readiness. Consumers are always assumed to readily accept the broadcast.
+
 On reset signal, output nothing and clear all queues.
+
+It is assumed that the buffers never overflow, due to limited processing speed of LSB and ALU.

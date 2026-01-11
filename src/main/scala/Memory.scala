@@ -2,19 +2,9 @@ import chisel3._
 import chisel3.util._
 import chisel3.experimental._
 import chisel3.util.experimental.loadMemoryFromFile
+import utils._
 
-object MemOpEnum extends ChiselEnum {
-  val lb = Value
-  val lbu = Value
-  val lh = Value
-  val lhu = Value
-  val lw = Value
-  val sb = Value
-  val sh = Value
-  val sw = Value
-}
-
-class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
+class Memory(initFile: String, memSize: Int) extends Module {
   // Helper function to convert Intel HEX format to simple hex format for loadMemoryFromFile
   private def convertIntelHexToSimpleHex(inputFile: String, outputFile: String): Unit = {
     import java.io.{BufferedReader, BufferedWriter, FileReader, FileWriter}
@@ -85,12 +75,12 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
       val op = MemOpEnum()
       val value = UInt(32.W)
       val address = UInt(32.W)
+      val index = UInt(5.W)
       val valid = Bool()
     })
     val memValue = Output(new Bundle {
       val ready = Bool()
-      val data = UInt(32.W)
-      val valid = Bool()
+      val data = ValidIO(new CDBData)
     })
     val clear = Input(Bool())
   })
@@ -101,45 +91,12 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
     loadMemoryFromFile(mem, tempFile)
   }
 
-  val iread_ready = RegInit(true.B)
-  val instruction0 = ShiftRegister(mem.read(io.iread.address + 0.U), delay - 1)
-  val instruction1 = ShiftRegister(mem.read(io.iread.address + 1.U), delay - 1)
-  val instruction2 = ShiftRegister(mem.read(io.iread.address + 2.U), delay - 1)
-  val instruction3 = ShiftRegister(mem.read(io.iread.address + 3.U), delay - 1)
+  val instruction0 = RegNext(mem.read(Mux(io.iread.valid, io.iread.address, 0.U) + 0.U), 0.U)
+  val instruction1 = RegNext(mem.read(Mux(io.iread.valid, io.iread.address, 0.U) + 1.U), 0.U)
+  val instruction2 = RegNext(mem.read(Mux(io.iread.valid, io.iread.address, 0.U) + 2.U), 0.U)
+  val instruction3 = RegNext(mem.read(Mux(io.iread.valid, io.iread.address, 0.U) + 3.U), 0.U)
   
-  io.iout.ready := iread_ready
-  io.iout.valid := ShiftRegister(io.iread.valid, delay, 0.U, io.clear)
+  io.iout.ready := true.B
+  io.iout.valid := RegNext(io.iread.valid)
   io.iout.data := Cat(instruction3, instruction2, instruction1, instruction0)
-
-  when(io.iread.valid) {
-    iread_ready <= false.B
-  }
-  when(io.iout.valid) {
-    iread_ready <= true.B
-  }
-  
-  val loadStoreReady = RegInit(true.B)
-  val load0 = ShiftRegister(mem.read(io.memAccess.address + 0.U), delay - 1)
-  val load1 = ShiftRegister(mem.read(io.memAccess.address + 1.U), delay - 1)
-  val load2 = ShiftRegister(mem.read(io.memAccess.address + 2.U), delay - 1)
-  val load3 = ShiftRegister(mem.read(io.memAccess.address + 3.U), delay - 1)
-  
-  io.memValue.ready := loadStoreReady
-  io.memValue.valid := ShiftRegister(io.memAccess.valid, delay, 0.U, io.clear)
-  
-  switch(io.memAccess.op) {
-    
-  }
-
-  when(io.memValue.valid) {
-    loadStoreReady <= false.B
-  }
-  when(io.iout.valid) {
-    loadStoreReady <= true.B
-  }
-
-  when(io.clear) {
-    iread_ready <= true.B
-    loadStoreReady <= true.B
-  }
 }

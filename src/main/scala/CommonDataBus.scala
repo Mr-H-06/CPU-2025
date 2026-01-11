@@ -1,10 +1,6 @@
 import chisel3._
 import chisel3.util._
-
-class CDBData extends Bundle {
-  val index = UInt(5.W)
-  val value = UInt(32.W)
-}
+import utils._
 
 class CommonDataBus extends Module {
   val io = IO(new Bundle {

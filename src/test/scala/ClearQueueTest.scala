@@ -4,8 +4,9 @@ import org.scalatest.matchers.should.Matchers
 import chisel3._
 import chisel3.util._
 import chiseltest._
+import utils._
 
-class MyTest extends AnyFlatSpec with ChiselScalatestTester {
+class ClearQueueTest extends AnyFlatSpec with ChiselScalatestTester {
   "ClearQueue" should "initialize correctly" in {
     test(new ClearQueue(UInt(32.W), 3)) { c =>
       c.io.enq.ready.expect(true.B)

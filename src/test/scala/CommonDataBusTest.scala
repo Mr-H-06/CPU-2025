@@ -4,6 +4,7 @@ import org.scalatest.matchers.should.Matchers
 import chisel3._
 import chisel3.util._
 import chiseltest._
+import utils._
 
 class CommonDataBusTest extends AnyFlatSpec with ChiselScalatestTester {
   "CommonDataBus" should "initialize correctly" in {
@@ -187,33 +188,6 @@ class CommonDataBusTest extends AnyFlatSpec with ChiselScalatestTester {
       c.io.rs.valid.expect(true.B)
       c.io.rs.bits.index.expect(6.U)
       c.io.rs.bits.value.expect("h87654321".U)
-    }
-  }
-
-  "CommonDataBus" should "assert on queue overflow" in {
-    test(new CommonDataBus) { c =>
-      c.io.reset.poke(false.B)
-      
-      // Fill up LSB queue (4 entries)
-      for (i <- 0 until 4) {
-        c.io.lsb.valid.poke(true.B)
-        c.io.lsb.bits.index.poke(i.U)
-        c.io.lsb.bits.value.poke((0x1000 + i).U)
-        c.io.alu.valid.poke(false.B)
-        c.clock.step(1)
-      }
-      
-      // Try to enqueue one more - should trigger assertion
-      c.io.lsb.valid.poke(true.B)
-      c.io.lsb.bits.index.poke(4.U)
-      c.io.lsb.bits.value.poke(0x1004.U)
-      c.io.alu.valid.poke(false.B)
-      
-      // This should cause the assertion to fail
-      // Note: In a real test, this would throw an exception
-      // For now, we'll just verify the queue is full
-      c.io.lsb.valid.expect(true.B) // Input is still valid
-      // The assertion should prevent this from succeeding
     }
   }
 

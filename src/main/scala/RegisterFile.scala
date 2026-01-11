@@ -1,4 +1,5 @@
 import chisel3._
+import utils._
 
 case class RegisterEntry() extends Bundle {
   val value = UInt(32.W)

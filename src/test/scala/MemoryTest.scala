@@ -4,10 +4,11 @@ import org.scalatest.matchers.should.Matchers
 import chisel3._
 import chisel3.util._
 import chiseltest._
+import utils._
 
- class MemoryTest extends AnyFlatSpec with ChiselScalatestTester {
+class MemoryTest extends AnyFlatSpec with ChiselScalatestTester {
   "Memory" should "initialize correctly" in {
-    test(new Memory("docs/memory-example.data", 1 << 14, 1)) { c =>
+    test(new Memory("docs/memory-example.data", 1 << 14)) { c =>
       c.io.iread.address.poke(0x00001000.U)
       c.io.iread.valid.poke(true.B)
       c.clock.step(1)

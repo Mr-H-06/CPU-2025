@@ -1,9 +1,12 @@
-import chisel3._
-import chiseltest._
+import org.scalatest._
 import org.scalatest.flatspec.AnyFlatSpec
+import org.scalatest.matchers.should.Matchers
+import chisel3._
+import chisel3.util._
+import chiseltest._
+import utils._
 
 class RegisterFileTest extends AnyFlatSpec with ChiselScalatestTester {
-
   "RegisterFile" should "initialize registers correctly" in {
     test(new RegisterFile) { dut =>
       // Register 0 should always be zero with invalid tag

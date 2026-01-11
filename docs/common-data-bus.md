@@ -8,8 +8,8 @@ The Common Data Bus is a broadcast mechanism that carries results from completed
 
 ### Inputs
 
-- `reset`: Reset signal to clear the bus.
-- `producers`: Input bundles from functional units(LSB/ALU) with ready/validness protocol(backpressure).
+- `reset`: Reset signal to clear the bus, from ROB.
+- `producers`: Input bundles from functional units(LSB/ALU) with validness.
   - `index`: ROB index of the result.
   - `value`: The result value.
 
@@ -23,13 +23,14 @@ The Common Data Bus is a broadcast mechanism that carries results from completed
 
 ### Structure
 
-The CDB only consists of arbitration logic.
+The CDB consists of FIFO queues for buffering and arbitration logic.
 
 ### Operation
 
-The core of the CDB is arbitration logic if multiple units try to broadcast simultaneously. This uses a round-robin arbiter of Chisel.
+The CDB has a queue as buffer for each input to eliminate backpressure. The output of the queues are controlled by a round-robin arbiter of Chisel.
 
 ## Implementation Details
 
-There are two separate input bundles, one from LSB and one from ALU with ready/validness protocol. They are wrapped up and fed to the arbiter.
+There are two separate input bundles, one from LSB and one from ALU with validness indicator. They then go through `ClearQueue`; the dequeue port is fed to the arbiter.
 There are three separate output bundles sharing the same output. The output has validness indicator but not readiness. Consumers are always assumed to readily accept the broadcast.
+On reset signal, output nothing and clear all queues.

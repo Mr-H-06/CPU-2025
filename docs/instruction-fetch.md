@@ -27,3 +27,5 @@ When ROB and corresponding functional unit (ROB/LSB/not required) are ready, iss
 The current branch prediction method is the most naive, assuming a jump always occurs.
 
 ## Implementation Details
+
+When the program counter is changed by control operations, it's two lowest bits should always be set to zero, ensuring correctly aligned instruction fetch.

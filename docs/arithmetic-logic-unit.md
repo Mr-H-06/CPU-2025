@@ -45,4 +45,4 @@ The ALU consists of combinational or pipelined circuits for arithmetic and logic
 
 ## Implementation Details
 
-The result goes through a `ShiftRegister` to simulate lag. It then goes through a `ClearQueue` (see `ClearQueue.md`) to smooth out backpressure.
+The result goes through a `ShiftRegister` to simulate lag.

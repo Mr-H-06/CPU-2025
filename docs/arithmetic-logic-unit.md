@@ -17,7 +17,6 @@ In the Chisel design, the ALU module has the following IO ports.
   - `op1`: First operand value.
   - `op2`: Second operand value.
   - `tag`: Destination tag for broadcasting.
-- `CDB_ready`: Backpressure from CDB.
 
 ### Outputs
 
@@ -37,9 +36,26 @@ The ALU consists of combinational or pipelined circuits for arithmetic and logic
 
 1. **Idle State**: The ALU is ready and waits for `exec_valid` signal.
 2. **Execution Start**: Upon receiving valid execution data, the ALU begins computation based on the operation type.
-3. **Computation**: Performs integer arithmetic/logic operations in 1-2 cycles.
+3. **Computation**: Performs integer arithmetic/logic operations in 1 cycle. Send results on next cycle.
 4. **Result Generation**: Once computation completes, `result_valid` is asserted with the result and tag.
 5. **Broadcasting**: Result is sent to the Common Data Bus for distribution. The ALU is ready to handle new data.
 6. **Reset**: On reset, clears internal state and becomes ready.
 
 ## Implementation Details
+
+`op` is one of the following:
+
+- `add`, op1 + op2.
+- `sub`, op1 - op2.
+- `and`, op1 & op2 (bitwise)
+- `or` , op1 | op2 (bitwise)
+- `xor`, op1 ^ op2 (bitwise)
+- `ll` , op1 << op2 (logical)
+- `rl` , op1 >> op2 (logical, zero-extend)
+- `ra` , op1 >> op2 (arithmetic, sign-extend)
+- `lt` , op1 < op2 ? 1 : 0 (signed comparison)
+- `ltu`, op1 < op2 ? 1 : 0 (unsigned comparison)
+- `eq` , op1 == op2 ? 1 : 0
+- `ne` , op1 != op2 ? 1 : 0
+- `ge` , op1 >= op2 ? 1 : 0 (signed comparison)
+- `geu`, op1 >= op2 ? 1 : 0 (unsigned comparison)

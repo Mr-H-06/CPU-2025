@@ -20,9 +20,38 @@ object MemOpEnum extends ChiselEnum {
   val sw = Value
 }
 
+object AluOpEnum extends ChiselEnum {
+  val ADD = Value
+  val SUB = Value
+  val AND = Value
+  val OR = Value
+  val XOR = Value
+  val LL = Value
+  val RL = Value
+  val RA = Value
+  val SLT = Value
+  val SLTU = Value
+  val EQ = Value
+  val NE = Value
+  val GE = Value
+  val GEU = Value
+}
+
 class MemInput extends Bundle {
   val op = MemOpEnum()
   val value = UInt(32.W)
   val address = UInt(32.W)
   val index = UInt(5.W)
+}
+
+class AluExecBits extends Bundle {
+  val op = AluOpEnum()
+  val op1 = UInt(32.W)
+  val op2 = UInt(32.W)
+  val tag = UInt(5.W)
+}
+
+class AluResultBits extends Bundle {
+  val value = UInt(32.W)
+  val tag = UInt(5.W)
 }

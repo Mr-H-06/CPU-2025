@@ -5,6 +5,8 @@ import utils._
 class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4) extends Module {
   val io = IO(new Bundle {
     val halted = Output(Bool())
+    val debug_cdb_rob = Output(Valid(new CDBData))
+    val debug_reg_a0 = Output(UInt(32.W))
   })
 
   // Modules
@@ -40,6 +42,7 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4) extend
   cdb.io.alu.valid := alu.io.result_valid
   cdb.io.alu.bits.index := alu.io.result_bits.tag
   cdb.io.alu.bits.value := alu.io.result_bits.value
+  io.debug_cdb_rob := cdb.io.rob
 
   // Register File wiring
   rf.io.writeback_valid := rob.io.writeback_valid
@@ -273,6 +276,8 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4) extend
   // Register file bookkeeping
   rf.io.destination_valid := willFire && writeDest
   rf.io.destination := rd
+
+  io.debug_reg_a0 := rf.io.alu_regs(10).value
 
   // IF readiness
   ifu.io.out.ready := willFire

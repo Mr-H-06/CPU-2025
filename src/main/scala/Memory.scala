@@ -128,8 +128,7 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
     cnt.reset()
     memInput := 0.U.asTypeOf(new Valid(new MemInput))
   }.otherwise {
-    when (io.memAccess.valid) {
-      assert(!memInput.valid, "Memory should not be accessed when busy")
+    when (io.memAccess.valid && !memInput.valid) {
       memInput := io.memAccess
       when (io.memAccess.bits.op === MemOpEnum.lb  || 
             io.memAccess.bits.op === MemOpEnum.lbu || 
@@ -137,6 +136,11 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
             io.memAccess.bits.op === MemOpEnum.lhu || 
             io.memAccess.bits.op === MemOpEnum.lw) {
         cnt.inc()
+      }.otherwise {
+        // For stores, immediately broadcast readiness on the CDB so ROB can commit
+        mValidReg := true.B
+        memOutput.index := io.memAccess.bits.index
+        memOutput.value := 0.U
       }
     }
     when (memInput.valid) {

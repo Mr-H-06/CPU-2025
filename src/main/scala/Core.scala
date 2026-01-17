@@ -2,15 +2,16 @@ import chisel3._
 import chisel3.util._
 import utils._
 
-class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4) extends Module {
+class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4, startPC: Int = 0) extends Module {
   val io = IO(new Bundle {
     val halted = Output(Bool())
     val debug_cdb_rob = Output(Valid(new CDBData))
     val debug_reg_a0 = Output(UInt(32.W))
+    val debug_pc = Output(UInt(32.W))
   })
 
   // Modules
-  val ifu = Module(new InstructionFetch())
+  val ifu = Module(new InstructionFetch(initialPC = startPC))
   val rob = Module(new ReorderBuffer())
   val rf = Module(new RegisterFile())
   val rs = Module(new ReservationStations())
@@ -19,11 +20,18 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4) extend
   val cdb = Module(new CommonDataBus())
   val mem = Module(new Memory(initFile, memSize, memDelay))
 
+  // Debug cycle counter
+  val dbgCycle = RegInit(0.U(32.W))
+  dbgCycle := dbgCycle + 1.U
+
+  // Watchdog removed
+
   val globalClear = reset.asBool || rob.io.clear
 
   // Instruction Fetch connections
+  val robResetHasTarget = rob.io.pc_reset.orR
   ifu.io.clear := globalClear
-  ifu.io.resetValid := rob.io.clear
+  ifu.io.resetValid := rob.io.clear && robResetHasTarget
   ifu.io.resetPC := rob.io.pc_reset
 
   // Memory instruction side
@@ -72,6 +80,11 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4) extend
   lsb.io.cdb := cdb.io.rs
   lsb.io.rf_entries := rf.io.lsb_regs
   lsb.io.rob_entries := rob.io.values
+  lsb.io.wb_valid := rob.io.writeback_valid
+  lsb.io.wb_index := rob.io.writeback_index
+  lsb.io.wb_tag := rob.io.writeback_tag
+  lsb.io.wb_value := rob.io.writeback_value
+  lsb.io.mem_ready := mem.io.memValue.ready
 
   // Memory data side (from LSB)
   mem.io.memAccess.valid := lsb.io.exec_valid
@@ -89,6 +102,8 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4) extend
 
   // Decode
   val instrValid = ifu.io.out.valid
+  // Do not accept/issue new instructions while a global clear is active
+  val canIssue = instrValid && !globalClear
   val instr = ifu.io.out.bits
   val opcode = instr.opcode
   val funct3 = instr.funct3
@@ -146,19 +161,19 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4) extend
   // Issue logic by opcode
   switch(opcode) {
     is("b0110111".U) { // LUI
-      willFire := instrValid && issueReadySimple
+      willFire := canIssue && issueReadySimple
       robHasValue := true.B
       robValue := imm
       writeDest := rd =/= 0.U
     }
     is("b0010111".U) { // AUIPC
-      willFire := instrValid && issueReadySimple
+      willFire := canIssue && issueReadySimple
       robHasValue := true.B
       robValue := pc + imm
       writeDest := rd =/= 0.U
     }
     is("b1101111".U) { // JAL
-      willFire := instrValid && issueReadySimple
+      willFire := canIssue && issueReadySimple
       robHasValue := true.B
       robValue := pc + 4.U
       robPcReset := pc + imm
@@ -166,7 +181,7 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4) extend
       writeDest := rd =/= 0.U
     }
     is("b1100111".U) { // JALR
-      willFire := instrValid && issueReadyALU
+      willFire := canIssue && issueReadyALU
       rs.io.issue_valid := willFire
       rs.io.issue_bits.op := AluOpEnum.ADD
       rs.io.issue_bits.op1_index := rs1
@@ -180,7 +195,7 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4) extend
       writeDest := rd =/= 0.U
     }
     is("b1100011".U) { // Branches
-      willFire := instrValid && issueReadyALU
+      willFire := canIssue && issueReadyALU
       rs.io.issue_valid := willFire
       rs.io.issue_bits.op1_index := rs1
       rs.io.issue_bits.op2_index := rs2
@@ -200,7 +215,7 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4) extend
       }
     }
     is("b0000011".U) { // LOAD
-      willFire := instrValid && issueReadyLSB
+      willFire := canIssue && issueReadyLSB
       lsb.io.issue_valid := willFire
       lsb.io.issue_bits.dest_tag := rob.io.tail
       lsb.io.issue_bits.op1_index := rs1
@@ -217,7 +232,7 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4) extend
       ))
     }
     is("b0100011".U) { // STORE
-      willFire := instrValid && issueReadyLSB
+      willFire := canIssue && issueReadyLSB
       lsb.io.issue_valid := willFire
       lsb.io.issue_bits.dest_tag := rob.io.tail
       lsb.io.issue_bits.op1_index := rs2 // store value
@@ -230,7 +245,7 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4) extend
       ))
     }
     is("b0010011".U) { // OP-IMM
-      willFire := instrValid && issueReadyALU
+      willFire := canIssue && issueReadyALU
       rs.io.issue_valid := willFire
       rs.io.issue_bits.op := aluOpImm(funct3, funct7)
       rs.io.issue_bits.op1_index := rs1
@@ -241,7 +256,7 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4) extend
       writeDest := rd =/= 0.U
     }
     is("b0110011".U) { // OP
-      willFire := instrValid && issueReadyALU
+      willFire := canIssue && issueReadyALU
       rs.io.issue_valid := willFire
       rs.io.issue_bits.op := aluOpR(funct3, funct7)
       rs.io.issue_bits.op1_index := rs1
@@ -252,14 +267,25 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4) extend
       writeDest := rd =/= 0.U
     }
     is("b0001111".U) { // FENCE -> NOP
-      willFire := instrValid && issueReadySimple
+      willFire := canIssue && issueReadySimple
       robHasValue := true.B
       robValue := 0.U
     }
     is("b1110011".U) { // SYSTEM -> treat as NOP
-      willFire := instrValid && issueReadySimple
+      willFire := canIssue && issueReadySimple
       robHasValue := true.B
       robValue := 0.U
+    }
+  }
+
+  // Early debug: see why issue may stall
+  when(dbgCycle < 256.U && instrValid) {
+    when(willFire) {
+      printf("[CORE] issue cycle=%d pc=%x opcode=%b rd=%d rs1=%d rs2=%d imm=%x readyALU=%d readyLSB=%d robReady=%d\n",
+        dbgCycle, pc, opcode, rd, rs1, rs2, imm, issueReadyALU, issueReadyLSB, rob.io.ready)
+    }.otherwise {
+      printf("[CORE] stall cycle=%d pc=%x opcode=%b rd=%d rs1=%d rs2=%d imm=%x readyALU=%d readyLSB=%d robReady=%d instrValid=%d\n",
+        dbgCycle, pc, opcode, rd, rs1, rs2, imm, issueReadyALU, issueReadyLSB, rob.io.ready, instrValid)
     }
   }
 
@@ -278,6 +304,7 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4) extend
   rf.io.destination := rd
 
   io.debug_reg_a0 := rf.io.alu_regs(10).value
+  io.debug_pc := ifu.io.mem_iread_address
 
   // IF readiness
   ifu.io.out.ready := willFire

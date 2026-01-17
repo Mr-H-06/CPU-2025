@@ -17,6 +17,9 @@ class ROBValue extends Bundle {
 
 class ReorderBuffer(entries: Int = 32) extends Module {
 	private val idxWidth = log2Ceil(entries)
+	// Debug cycle counter
+	private val dbgCycle = RegInit(0.U(32.W))
+	dbgCycle := dbgCycle + 1.U
 
 	class Entry extends Bundle {
 		val valid = Bool()
@@ -89,7 +92,9 @@ class ReorderBuffer(entries: Int = 32) extends Module {
 	// issue phase
 	when(io.issue_valid && io.ready) {
 		entriesReg(tail).valid := true.B
-		entriesReg(tail).ready := io.issue_has_value
+		// JALR needs its target from the ALU/CDB before the entry can be considered ready
+		val isJalrIssue = io.issue_bits.op === "b1100111".U
+		entriesReg(tail).ready := io.issue_has_value && !isJalrIssue
 		entriesReg(tail).op := io.issue_bits.op
 		entriesReg(tail).rd := io.issue_bits.rd
 		entriesReg(tail).value := Mux(io.issue_has_value, io.issue_value, 0.U)
@@ -122,21 +127,34 @@ class ReorderBuffer(entries: Int = 32) extends Module {
 	val isBranch = headEntry.op === "b1100011".U
 	val isJalr = headEntry.op === "b1100111".U
 	val isJal = headEntry.op === "b1101111".U
+	val isCtrl = isBranch || isJalr || isJal
 	val isStore = headEntry.op === "b0100011".U
 	val headReady = count =/= 0.U && headEntry.valid && headEntry.ready
+
+	// Short debug: observe head status and pc_reset during early cycles
+	when(dbgCycle < 600.U) {
+		printf("[ROBDBG] cycle=%d head=%d tail=%d count=%d valid=%d ready=%d op=%b pc_reset_tbl=%x clear_out=%d pc_reset_out=%x\n",
+			dbgCycle, head, tail, count, headEntry.valid, headEntry.ready, headEntry.op, pcResetTable(head), io.clear, io.pc_reset)
+	}
+
+	// Debug: observe branch/jump commits and clears
+	when(headReady && isCtrl) {
+		printf("[ROB] head=%d op=%b value=%x pred=%x pc_reset=%x ready=%d count=%d\n", head, headEntry.op, headEntry.value, headEntry.prediction, pcResetTable(head), headEntry.ready, count)
+	}
 
 	// defaults for pulse outputs
 	writebackValidReg := false.B
 	commitStoreReg := false.B
 	clearReg := false.B
 
-	when(headReady && (isBranch || isJalr || isJal)) {
+	when(headReady && isCtrl) {
 		pcResetReg := pcResetTable(head) & (~3.U(32.W))
 	}
 
 	when(headReady) {
-		val mispredict = (isBranch || isJalr || isJal) && (headEntry.value =/= headEntry.prediction)
+		val mispredict = (isBranch && (headEntry.value =/= headEntry.prediction)) || isJal || isJalr
 		when(mispredict) {
+			printf("[ROB] mispredict head=%d op=%b value=%x pred=%x pc_reset=%x\n", head, headEntry.op, headEntry.value, headEntry.prediction, pcResetTable(head))
 			clearReg := true.B
 			when(headEntry.rd =/= 0.U && !isStore) {
 				writebackValidReg := true.B

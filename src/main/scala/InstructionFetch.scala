@@ -14,7 +14,7 @@ class IFDecoded extends Bundle {
   val funct7 = UInt(7.W)
 }
 
-class InstructionFetch(queueDepth: Int = 4) extends Module {
+class InstructionFetch(initialPC: Int = 0, queueDepth: Int = 4) extends Module {
   val io = IO(new Bundle {
     // control
     val resetPC = Input(UInt(32.W))
@@ -32,13 +32,26 @@ class InstructionFetch(queueDepth: Int = 4) extends Module {
     val out = Decoupled(new IFDecoded)
   })
 
-  val pcReg = RegInit(0.U(32.W))
-  val reqPcReg = RegInit(0.U(32.W))
+  // Debug cycle counter (local to IF)
+  val dbgCycle = RegInit(0.U(32.W))
+  dbgCycle := dbgCycle + 1.U
+
+  val pcReg = RegInit(initialPC.U(32.W))
+  val reqPcReg = RegInit(initialPC.U(32.W))
+  // epoch toggles on clears to invalidate stale memory responses
+  val epoch = RegInit(false.B)
+  val outstandingEpoch = RegInit(false.B)
   val issuing = WireDefault(false.B)
   val busy = RegInit(false.B)
 
+  val resetTarget = io.resetPC & (~3.U(32.W))
+
   when(io.clear || io.resetValid) {
-    pcReg := Mux(io.resetValid, io.resetPC & ~3.U, 0.U)
+    val target = Mux(io.resetValid, resetTarget, initialPC.U)
+    pcReg := target
+    reqPcReg := target
+    epoch := ~epoch
+    busy := false.B
   }.elsewhen(issuing) {
     pcReg := pcReg + 4.U
   }
@@ -47,23 +60,31 @@ class InstructionFetch(queueDepth: Int = 4) extends Module {
   val q = Module(new Queue(new IFDecoded, queueDepth))
   q.io.deq <> io.out
 
-  val canRequest = q.io.enq.ready && io.mem_iout_ready && !busy
+  // Block new fetch requests while a pipeline clear/reset is in flight
+  val canRequest = q.io.enq.ready && io.mem_iout_ready && !busy && !io.clear && !io.resetValid
   issuing := canRequest
   io.mem_iread_address := pcReg
   io.mem_iread_valid := canRequest
 
   when(issuing) {
     reqPcReg := pcReg
+    outstandingEpoch := epoch
     busy := true.B
+  }
+
+  when(io.resetValid) {
+    printf("[IF] cycle=%d resetValid pcReg=%x resetPC=%x clear=%d\n", dbgCycle, pcReg, io.resetPC, io.clear)
   }
 
   def decodeImm(instr: UInt): UInt = {
     val opcode = instr(6, 0)
     val immI = Cat(Fill(20, instr(31)), instr(31, 20))
     val immS = Cat(Fill(20, instr(31)), instr(31, 25), instr(11, 7))
-    val immB = Cat(Fill(19, instr(31)), instr(7), instr(30, 25), instr(11, 8), 0.U(1.W))
+    // Branch immediate: imm[12|10:5|4:1|11|0] with full sign-extension
+    val immB = Cat(Fill(20, instr(31)), instr(7), instr(30, 25), instr(11, 8), 0.U(1.W))
     val immU = Cat(instr(31, 12), 0.U(12.W))
-    val immJ = Cat(Fill(11, instr(31)), instr(19, 12), instr(20), instr(30, 21), 0.U(1.W))
+    // J-type immediate: sign-extend imm[20], layout [20|10:1|11|19:12|0]
+    val immJ = Cat(Fill(12, instr(31)), instr(19, 12), instr(20), instr(30, 21), 0.U(1.W))
     MuxLookup(opcode, 0.U, Seq(
       "b0010011".U -> immI, // OP-IMM
       "b0000011".U -> immI, // LOAD
@@ -77,7 +98,12 @@ class InstructionFetch(queueDepth: Int = 4) extends Module {
     ))
   }
 
-  q.io.enq.valid := io.mem_iout_valid && !io.clear
+  // accept instruction return only if it matches current epoch and we have an outstanding request
+  // Accept a response in the same cycle we launched a request (issuing)
+  // to handle zero-latency instruction memory. Without the issuing term, busy
+  // was still false in that first cycle, dropping the response and wedging busy true.
+  val respMatches = (busy || issuing) && (outstandingEpoch === epoch)
+  q.io.enq.valid := io.mem_iout_valid && !io.clear && respMatches
   val opcode = io.mem_iout_data(6, 0)
   q.io.enq.bits.instr := io.mem_iout_data
   q.io.enq.bits.pc := reqPcReg
@@ -96,10 +122,22 @@ class InstructionFetch(queueDepth: Int = 4) extends Module {
 
   when(io.clear) {
     q.io.deq.ready := true.B // drop queued entries
+  }
+
+  when(io.mem_iout_valid && respMatches) {
     busy := false.B
   }
 
-  when(io.mem_iout_valid) {
-    busy := false.B
+  when(dbgCycle < 48.U) {
+    printf("[IFDBG] cycle=%d pcReg=%x reqPc=%x resetValid=%d resetPC=%x clear=%d busy=%d\n",
+      dbgCycle, pcReg, reqPcReg, io.resetValid, resetTarget, io.clear, busy)
+  }
+
+  // Targeted debug around the redirect window to check fetch state and queue handshakes
+  when(dbgCycle >= 120.U && dbgCycle < 152.U) {
+    printf("[IFDBG2] cycle=%d pcReg=%x reqPc=%x busy=%d clear=%d resetValid=%d epoch=%d outEpoch=%d mem_req=%d mem_rdy=%d mem_rsp=%d q_enq_v=%d q_enq_r=%d q_deq_v=%d q_deq_r=%d\n",
+      dbgCycle, pcReg, reqPcReg, busy, io.clear, io.resetValid, epoch, outstandingEpoch,
+      io.mem_iread_valid, io.mem_iout_ready, io.mem_iout_valid,
+      q.io.enq.valid, q.io.enq.ready, q.io.deq.valid, q.io.deq.ready)
   }
 }

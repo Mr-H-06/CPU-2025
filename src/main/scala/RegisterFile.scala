@@ -39,18 +39,18 @@ class RegisterFile extends Module {
     for (i <- 0 until 32) {
       regs(i).tag_valid := false.B
     }
-  }.otherwise {
-    // ROB writeback
-    when(io.writeback_valid && io.writeback_index =/= 0.U) {
-      regs(io.writeback_index).value := io.writeback_value
-      when(regs(io.writeback_index).tag === io.writeback_tag) {
-        regs(io.writeback_index).tag_valid := false.B
-      }
+  }
+
+  // ROB writeback (allowed even during a clear so completed ops are not lost)
+  when(io.writeback_valid && io.writeback_index =/= 0.U) {
+    regs(io.writeback_index).value := io.writeback_value
+    when(regs(io.writeback_index).tag === io.writeback_tag) {
+      regs(io.writeback_index).tag_valid := false.B
     }
-    // IF bookkeeping (higher precedence)
-    when(io.destination_valid && io.destination =/= 0.U) {
-      regs(io.destination).tag := io.tail
-      regs(io.destination).tag_valid := true.B
-    }
+  }
+  // IF bookkeeping (higher precedence, but suppressed during a clear)
+  when(!io.clear && io.destination_valid && io.destination =/= 0.U) {
+    regs(io.destination).tag := io.tail
+    regs(io.destination).tag_valid := true.B
   }
 }

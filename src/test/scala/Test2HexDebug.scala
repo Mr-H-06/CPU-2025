@@ -10,7 +10,7 @@ class Test2HexDebug extends AnyFlatSpec with ChiselScalatestTester {
       var halted = false
       var lastPc: BigInt = -1
       var stagnant = 0
-      val maxCycles = 100 // allow program to halt while collecting debug traces
+      val maxCycles = 2000 // allow program to halt while collecting debug traces
       val maxStagnant = 50 // fail fast on suspected dead loop
 
       while (cycles < maxCycles && !halted) {

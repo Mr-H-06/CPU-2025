@@ -2,7 +2,7 @@ import chisel3._
 import chiseltest._
 import org.scalatest.flatspec.AnyFlatSpec
 
-class TestHexA0Test extends AnyFlatSpec with ChiselScalatestTester {
+class TestHex extends AnyFlatSpec with ChiselScalatestTester {
   "Core" should "load test.hex without assertions" in {
     test(new Core(initFile = "src/test/resources/test.hex", memSize = 8192, memDelay = 4)) { c =>
       c.clock.setTimeout(0)

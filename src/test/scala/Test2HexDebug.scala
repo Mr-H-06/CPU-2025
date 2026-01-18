@@ -10,17 +10,25 @@ class Test2HexDebug extends AnyFlatSpec with ChiselScalatestTester {
       var halted = false
       var lastPc: BigInt = -1
       var stagnant = 0
-      val maxCycles = 2000 // temporarily raised for debug
+      val maxCycles = 100 // allow program to halt while collecting debug traces
       val maxStagnant = 50 // fail fast on suspected dead loop
 
       while (cycles < maxCycles && !halted) {
         val pc = c.io.debug_pc.peek().litValue
         val haltedNow = c.io.halted.peek().litToBoolean
+        val cdb = c.io.debug_cdb_rob
         if (pc == lastPc) stagnant += 1 else stagnant = 0
         lastPc = pc
 
         val pcHex = f"0x${pc.toLong}%08x"
-        println(f"[cycle $cycles%4d] pc=$pcHex halted=$haltedNow stagnant=$stagnant")
+        // Print PC plus CDB activity to illustrate execute/complete order vs fetch order
+        val cdbMsg = if (cdb.valid.peek().litToBoolean) {
+          val idx = cdb.bits.index.peek().litValue.toInt
+          val value = cdb.bits.value.peek().litValue
+          f" cdb(tag=$idx,value=0x$value%08x)"
+        } else ""
+
+        println(f"[cycle $cycles%4d] pc=$pcHex halted=$haltedNow stagnant=$stagnant$cdbMsg")
 
         if (stagnant >= maxStagnant) {
           fail(s"PC stuck at $pcHex for $stagnant cycles (possible dead loop)")

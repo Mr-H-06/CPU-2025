@@ -4,7 +4,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 
 class TestHex extends AnyFlatSpec with ChiselScalatestTester {
   "Core" should "load test.hex without assertions" in {
-    test(new Core(initFile = "src/test/resources/test.hex", memSize = 8192, memDelay = 4)) { c =>
+    test(new Core(initFile = "src/test/resources/test.data", memSize = 131072, memDelay = 4)) { c =>
       c.clock.setTimeout(0)
       var cycles = 0
       // run a generous number of cycles; pass as long as no internal assertion fires

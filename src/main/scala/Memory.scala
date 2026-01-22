@@ -7,6 +7,10 @@ import utils._
 class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
   require(delay >= 4, s"Memory delay must be >= 4, got $delay.")
 
+  // Lightweight cycle counter for targeted debug prints
+  private val dbgCycle = RegInit(0.U(32.W))
+  dbgCycle := dbgCycle + 1.U
+
   // Helper function to convert Intel HEX format to simple hex format for loadMemoryFromFile
   private def convertIntelHexToSimpleHex(inputFile: String, outputFile: String): Unit = {
     import java.io.{BufferedReader, BufferedWriter, FileReader, FileWriter}
@@ -48,6 +52,15 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
             }
           }
         }
+      }
+
+      // Pad the remainder of the memory image with zeros so that any
+      // unspecified addresses in the input file are deterministic instead of
+      // picking up whatever initial value the simulator assigns.
+      while (currentAddress < memSize) {
+        writer.write("00")
+        writer.newLine()
+        currentAddress += 1
       }
     } finally {
       reader.close()
@@ -129,18 +142,61 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
     memInput := 0.U.asTypeOf(new Valid(new MemInput))
   }.otherwise {
     when (io.memAccess.valid && !memInput.valid) {
-      memInput := io.memAccess
+      val addr = io.memAccess.bits.address
+      val inRange = addr < memSize.U
+      val inRangeWord = (addr + 3.U) < memSize.U
+      val watchAddr = "h000011a0".U
       when (io.memAccess.bits.op === MemOpEnum.lb  || 
             io.memAccess.bits.op === MemOpEnum.lbu || 
             io.memAccess.bits.op === MemOpEnum.lh  || 
             io.memAccess.bits.op === MemOpEnum.lhu || 
             io.memAccess.bits.op === MemOpEnum.lw) {
-        cnt.inc()
+        // Load: buffer the request and start the delay counter (ignore out-of-range)
+        when(inRange) {
+          memInput := io.memAccess
+          cnt.inc()
+          when(addr === watchAddr) {
+            printf(p"[MEM-REQ] cyc=${dbgCycle} load op=${io.memAccess.bits.op.asUInt} addr=0x${Hexadecimal(addr)} idx=${io.memAccess.bits.index}\n")
+          }
+        }.otherwise {
+          memOutput.index := io.memAccess.bits.index
+          memOutput.value := 0.U
+          mValidReg := true.B
+        }
       }.otherwise {
-        // For stores, immediately broadcast readiness on the CDB so ROB can commit
-        mValidReg := true.B
-        memOutput.index := io.memAccess.bits.index
-        memOutput.value := 0.U
+        // Store: only apply when the ROB head commits the store
+        assert(io.commit, "Store issued without commit_store")
+        when(io.commit) {
+          memOutput.index := io.memAccess.bits.index
+          memOutput.value := 0.U
+          mValidReg := true.B
+          when(addr === watchAddr) {
+            printf(p"[MEM-REQ] cyc=${dbgCycle} store op=${io.memAccess.bits.op.asUInt} addr=0x${Hexadecimal(addr)} val=0x${Hexadecimal(io.memAccess.bits.value)} idx=${io.memAccess.bits.index}\n")
+          }
+          switch (io.memAccess.bits.op) {
+            is (MemOpEnum.sb) {
+              when(inRange) {
+                mem.write(addr, io.memAccess.bits.value(7, 0))
+              }
+            }
+            is (MemOpEnum.sh) {
+              when(inRange && (addr + 1.U) < memSize.U) {
+                mem.write(addr, io.memAccess.bits.value(7, 0))
+                mem.write(addr + 1.U, io.memAccess.bits.value(15, 8))
+              }
+            }
+            is (MemOpEnum.sw) {
+              when(inRangeWord) {
+                mem.write(addr, io.memAccess.bits.value(7, 0))
+                mem.write(addr + 1.U, io.memAccess.bits.value(15, 8))
+                mem.write(addr + 2.U, io.memAccess.bits.value(23, 16))
+                mem.write(addr + 3.U, io.memAccess.bits.value(31, 24))
+              }
+            }
+          }
+          // Keep memInput free so subsequent memory ops are not blocked
+          memInput.valid := false.B
+        }
       }
     }
     when (memInput.valid) {
@@ -154,6 +210,7 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
           memInput.valid := false.B
           mValidReg := true.B
           memOutput.index := memInput.bits.index
+          val watchAddr = "h000011a0".U
           switch (memInput.bits.op) {
             is (MemOpEnum.lb) {
               memOutput.value := Cat(Fill(24, data0(7)), data0)
@@ -171,32 +228,12 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
               memOutput.value := Cat(data3, data2, data1, data0)
             }
           }
-        }
-      }.otherwise { // store
-        assert (memInput.bits.op === MemOpEnum.sb || 
-                memInput.bits.op === MemOpEnum.sh || 
-                memInput.bits.op === MemOpEnum.sw )
-        when (io.commit) { // output
-          memInput.valid := false.B
-          mValidReg := true.B
-          memOutput.index := memInput.bits.index
-          memOutput.value := 0.U
-          switch (memInput.bits.op) {
-            is (MemOpEnum.sb) {
-              mem.write(memInput.bits.address, memInput.bits.value(7, 0))
-            }
-            is (MemOpEnum.sh) {
-              mem.write(memInput.bits.address, memInput.bits.value(7, 0))
-              mem.write(memInput.bits.address + 1.U, memInput.bits.value(15, 8))
-            }
-            is (MemOpEnum.sw) {
-              mem.write(memInput.bits.address, memInput.bits.value(7, 0))
-              mem.write(memInput.bits.address + 1.U, memInput.bits.value(15, 8))
-              mem.write(memInput.bits.address + 2.U, memInput.bits.value(23, 16))
-              mem.write(memInput.bits.address + 3.U, memInput.bits.value(31, 24))
-            }
+          when(memInput.bits.address === watchAddr) {
+            printf(p"[MEM-RSP] cyc=${dbgCycle} load addr=0x${Hexadecimal(memInput.bits.address)} val=0x${Hexadecimal(memOutput.value)} idx=${memOutput.index}\n")
           }
         }
+      }.otherwise { // store requests no longer wait for commit; handled when accepted
+        memInput.valid := false.B
       }
     }
   }

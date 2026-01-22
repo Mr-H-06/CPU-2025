@@ -21,6 +21,7 @@ class ExecBitsLSB extends Bundle {
 
 // Internal queue entry
 class ReservationStationEntryLSB extends Bundle {
+  val valid = Bool()
   val op = MemOpEnum()
   val dest_tag = UInt(5.W)
   val op1_tag = UInt(5.W)
@@ -40,6 +41,8 @@ class ReservationStationLSB(entries: Int = 4) extends Module {
     val issue_valid = Input(Bool())
     val issue_bits = Input(new IssueBitsLSB())
     val cdb = Input(Valid(new CDBData))
+    // Allow stores to execute only when their ROB head commits
+    val commit_store = Input(Bool())
     val rf_entries = Input(Vec(32, new RegisterEntry()))
     val rob_entries = Input(Vec(32, new ROBValue()))
     // Memory accept signal: only fire exec when memory can take a request
@@ -58,14 +61,29 @@ class ReservationStationLSB(entries: Int = 4) extends Module {
   val enqPtr = RegInit(0.U(log2Ceil(entries).W))
   val deqPtr = RegInit(0.U(log2Ceil(entries).W))
   val count = RegInit(0.U(log2Ceil(entries + 1).W))
-  // Debug cycle counter for short-term tracing
+  // Debug cycle counter for short-term tracing (muted by lsbDbg flag)
   private val dbgCycle = RegInit(0.U(32.W))
   dbgCycle := dbgCycle + 1.U
+  private val lsbDbg = dbgCycle < 400.U
 
   val full = count === entries.U
   val empty = count === 0.U
 
-  io.issue_ready := !full
+  // Locate a free slot; bias search from enqPtr to preserve approximate FIFO order
+  val freeVec = Wire(Vec(entries, Bool()))
+  for (i <- 0 until entries) {
+    freeVec(i) := !mem(i).valid
+  }
+  val freeByOffset = Wire(Vec(entries, Bool()))
+  for (i <- 0 until entries) {
+    val idx = (enqPtr + i.U) % entries.U
+    freeByOffset(i) := freeVec(idx)
+  }
+  val hasFree = freeByOffset.asUInt.orR
+  val freeOffset = PriorityEncoder(freeByOffset.asUInt)
+  val chosenEnq = (enqPtr + freeOffset) % entries.U
+
+  io.issue_ready := hasFree
 
   val rf_op1 = io.rf_entries(io.issue_bits.op1_index)
   val op1_tag = rf_op1.tag
@@ -86,6 +104,7 @@ class ReservationStationLSB(entries: Int = 4) extends Module {
 
   // Prepare entry
   val entry = Wire(new ReservationStationEntryLSB())
+  entry.valid := true.B
   entry.op := io.issue_bits.op
   entry.dest_tag := io.issue_bits.dest_tag
   entry.op1_tag := op1_tag
@@ -113,74 +132,76 @@ class ReservationStationLSB(entries: Int = 4) extends Module {
   }
 
   // Issue
-  when(io.issue_valid && !full) {
-    mem(enqPtr) := entry
-    enqPtr := (enqPtr + 1.U) % entries.U
+  when(io.issue_valid && hasFree) {
+    mem(chosenEnq) := entry
+    enqPtr := (chosenEnq + 1.U) % entries.U
     count := count + 1.U
-
-    when(dbgCycle < 200.U) {
-      printf("[LSB] enq cycle=%d ptr=%d op=%d dest=%d op1_ready=%d op2_ready=%d addr=%x val=%x\n",
-        dbgCycle, enqPtr, entry.op.asUInt, entry.dest_tag, entry.op1_ready, entry.op2_ready,
-        entry.op2_value + entry.op3_value, entry.op1_value)
-    }
   }
 
-  // Deq
-  val deq_entry = mem(deqPtr)
-  val effective_empty = empty && ! (io.issue_valid && !full)
-  val effective_deq_entry = Mux(io.issue_valid && !full && empty, entry, deq_entry)
+  // Readiness tracking per slot to let ready_now -> ready_prev be remembered even when head is skipped
   def isStoreFromOp(op: MemOpEnum.Type) = op.isOneOf(MemOpEnum.sb, MemOpEnum.sh, MemOpEnum.sw)
-  val operands_ready_now = effective_deq_entry.op1_ready && effective_deq_entry.op2_ready && (effective_deq_entry.op3_ready || !isStoreFromOp(effective_deq_entry.op))
-  val operands_ready_prev = RegNext(operands_ready_now, false.B)
-  val exec_from_deq = !effective_empty && operands_ready_now
-
-  // 如果操作数刚刚变为就绪且本拍 CDB 有效，推迟一拍发射
-  val exec_gate = exec_from_deq && (operands_ready_prev || !io.cdb.valid) && io.mem_ready
-
-  // Targeted debug to catch mem_ready gating stalls
-  when(dbgCycle < 80.U) {
-    when(exec_from_deq && !io.mem_ready) {
-      printf("[LSBDBG] stall mem_not_ready cycle=%d deq=%d cnt=%d op=%d op1_rdy=%d op2_rdy=%d gate_prev=%d\n",
-        dbgCycle, deqPtr, count, effective_deq_entry.op.asUInt, effective_deq_entry.op1_ready, effective_deq_entry.op2_ready, operands_ready_prev)
-    }
-    when(exec_from_deq && io.mem_ready) {
-      printf("[LSBDBG] ready_for_exec cycle=%d deq=%d cnt=%d op=%d gate_prev=%d cdb_v=%d exec_gate=%d\n",
-        dbgCycle, deqPtr, count, effective_deq_entry.op.asUInt, operands_ready_prev, io.cdb.valid, exec_gate)
-    }
+  val operands_ready_now = Wire(Vec(entries, Bool()))
+  val operands_ready_prev = RegInit(VecInit(Seq.fill(entries)(false.B)))
+  val storeVec = Wire(Vec(entries, Bool()))
+  for (i <- 0 until entries) {
+    storeVec(i) := isStoreFromOp(mem(i).op)
+    operands_ready_now(i) := mem(i).valid && mem(i).op1_ready && mem(i).op2_ready && (mem(i).op3_ready || !storeVec(i))
   }
+  operands_ready_prev := operands_ready_now
+
+  // Oldest-first search for the first executable entry.
+  // Conservative memory ordering: block loads behind older stores (no store-to-load forwarding).
+  val candidateVec = Wire(Vec(entries, Bool()))
+  val olderStore = Wire(Vec(entries, Bool()))
+  for (i <- 0 until entries) {
+    val idx = (deqPtr + i.U) % entries.U
+    if (i == 0) {
+      olderStore(i) := false.B
+    } else {
+      val prevIdx = (deqPtr + (i - 1).U) % entries.U
+      olderStore(i) := olderStore(i - 1) || (mem(prevIdx).valid && storeVec(prevIdx))
+    }
+
+    val ready_gate = operands_ready_prev(idx) || !io.cdb.valid || storeVec(idx)
+    val blockLoad = !storeVec(idx) && olderStore(i)
+    candidateVec(i) := operands_ready_now(idx) && ready_gate && (!storeVec(idx) || io.commit_store) && !blockLoad
+  }
+  val candidateValid = candidateVec.asUInt.orR
+  val candidateOffset = PriorityEncoder(candidateVec.asUInt)
+  val candidateIdx = (deqPtr + candidateOffset) % entries.U
+
+  val exec_gate = candidateValid && io.mem_ready
+
 
   io.exec_valid := exec_gate
-  io.exec_bits.op := effective_deq_entry.op
-  io.exec_bits.value := Mux(isStoreFromOp(effective_deq_entry.op), effective_deq_entry.op1_value, 0.U)
-  io.exec_bits.address := effective_deq_entry.op2_value + effective_deq_entry.op3_value
-  io.exec_bits.index := effective_deq_entry.dest_tag
+  io.exec_bits.op := mem(candidateIdx).op
+  io.exec_bits.value := Mux(isStoreFromOp(mem(candidateIdx).op), mem(candidateIdx).op1_value, 0.U)
+  io.exec_bits.address := mem(candidateIdx).op2_value + mem(candidateIdx).op3_value
+  io.exec_bits.index := mem(candidateIdx).dest_tag
+
+  val watchAddr = "h000011a0".U
+  when(exec_gate && io.exec_bits.address === watchAddr) {
+    printf(p"[LSB] cyc=${dbgCycle} op=${io.exec_bits.op.asUInt} addr=0x${Hexadecimal(io.exec_bits.address)} val=0x${Hexadecimal(io.exec_bits.value)} idx=${io.exec_bits.index}\n")
+  }
 
   when(exec_gate) {
-    when(!(io.issue_valid && !full && empty)) {
-      deqPtr := (deqPtr + 1.U) % entries.U
-      count := count - 1.U
-    }
-
-    when(dbgCycle < 200.U) {
-      printf("[LSB] exec cycle=%d ptr=%d op=%d idx=%d addr=%x val=%x op1_rdy=%d op2_rdy=%d\n",
-        dbgCycle, deqPtr, effective_deq_entry.op.asUInt, effective_deq_entry.dest_tag,
-        io.exec_bits.address, io.exec_bits.value,
-        effective_deq_entry.op1_ready, effective_deq_entry.op2_ready)
-    }
+    mem(candidateIdx).valid := false.B
+    deqPtr := (candidateIdx + 1.U) % entries.U
+    count := Mux(count === 0.U, 0.U, count - 1.U)
   }
 
   // CDB updates
   when(io.cdb.valid) {
     for (i <- 0 until entries) {
-      when(mem(i).op1_tag === io.cdb.bits.index && !mem(i).op1_ready) {
+      when(mem(i).valid && mem(i).op1_tag === io.cdb.bits.index && !mem(i).op1_ready) {
         mem(i).op1_value := io.cdb.bits.value
         mem(i).op1_ready := true.B
       }
-      when(mem(i).op2_tag === io.cdb.bits.index && !mem(i).op2_ready) {
+      when(mem(i).valid && mem(i).op2_tag === io.cdb.bits.index && !mem(i).op2_ready) {
         mem(i).op2_value := io.cdb.bits.value
         mem(i).op2_ready := true.B
       }
-      when(mem(i).op3_tag === io.cdb.bits.index && !mem(i).op3_ready) {
+      when(mem(i).valid && mem(i).op3_tag === io.cdb.bits.index && !mem(i).op3_ready) {
         mem(i).op3_value := io.cdb.bits.value
         mem(i).op3_ready := true.B
       }
@@ -194,6 +215,7 @@ class ReservationStationLSB(entries: Int = 4) extends Module {
     count := 0.U
     for (i <- 0 until entries) {
       mem(i) := 0.U.asTypeOf(new ReservationStationEntryLSB())
+      mem(i).valid := false.B
     }
   }
 }

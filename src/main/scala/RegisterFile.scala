@@ -22,6 +22,7 @@ class RegisterFile extends Module {
     // Outputs
     val alu_regs = Output(Vec(32, RegisterEntry()))
     val lsb_regs = Output(Vec(32, RegisterEntry()))
+    val debug_regs = Output(Vec(32, UInt(32.W)))
   })
 
   val regs = RegInit(VecInit(Seq.fill(32)(0.U.asTypeOf(new RegisterEntry))))
@@ -33,6 +34,7 @@ class RegisterFile extends Module {
   // Output the register file to reservation stations
   io.alu_regs := regs
   io.lsb_regs := regs
+  io.debug_regs := regs.map(_.value)
 
   // Logic for updates
   when(io.clear) {

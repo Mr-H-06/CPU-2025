@@ -42,7 +42,7 @@ class InstructionFetch(initialPC: Int = 0, queueDepth: Int = 4) extends Module {
   val epoch = RegInit(false.B)
   val outstandingEpoch = RegInit(false.B)
   val issuing = WireDefault(false.B)
-  val busy = RegInit(false.B)
+  val outstanding = RegInit(false.B)
 
   val resetTarget = io.resetPC & (~3.U(32.W))
 
@@ -51,17 +51,17 @@ class InstructionFetch(initialPC: Int = 0, queueDepth: Int = 4) extends Module {
     pcReg := target
     reqPcReg := target
     epoch := ~epoch
-    busy := false.B
+    outstanding := false.B
   }.elsewhen(issuing) {
     pcReg := pcReg + 4.U
   }
 
   // request when queue can accept and memory ready
-  val q = Module(new Queue(new IFDecoded, queueDepth))
+  val q = withReset(reset.asBool || io.clear || io.resetValid)(Module(new Queue(new IFDecoded, queueDepth)))
   q.io.deq <> io.out
 
   // Block new fetch requests while a pipeline clear/reset is in flight
-  val canRequest = q.io.enq.ready && io.mem_iout_ready && !busy && !io.clear && !io.resetValid
+  val canRequest = q.io.enq.ready && io.mem_iout_ready && !io.clear && !io.resetValid
   issuing := canRequest
   io.mem_iread_address := pcReg
   io.mem_iread_valid := canRequest
@@ -69,10 +69,11 @@ class InstructionFetch(initialPC: Int = 0, queueDepth: Int = 4) extends Module {
   when(issuing) {
     reqPcReg := pcReg
     outstandingEpoch := epoch
-    busy := true.B
+    outstanding := true.B
   }
 
-  when(io.resetValid) {
+  val ifDbg = false.B
+  when(ifDbg && io.resetValid) {
     printf("[IF] cycle=%d resetValid pcReg=%x resetPC=%x clear=%d\n", dbgCycle, pcReg, io.resetPC, io.clear)
   }
 
@@ -100,9 +101,8 @@ class InstructionFetch(initialPC: Int = 0, queueDepth: Int = 4) extends Module {
 
   // accept instruction return only if it matches current epoch and we have an outstanding request
   // Accept a response in the same cycle we launched a request (issuing)
-  // to handle zero-latency instruction memory. Without the issuing term, busy
-  // was still false in that first cycle, dropping the response and wedging busy true.
-  val respMatches = (busy || issuing) && (outstandingEpoch === epoch)
+  // to handle zero-latency instruction memory.
+  val respMatches = (outstanding || issuing) && (outstandingEpoch === epoch)
   q.io.enq.valid := io.mem_iout_valid && !io.clear && respMatches
   val opcode = io.mem_iout_data(6, 0)
   q.io.enq.bits.instr := io.mem_iout_data
@@ -125,18 +125,18 @@ class InstructionFetch(initialPC: Int = 0, queueDepth: Int = 4) extends Module {
   }
 
   when(io.mem_iout_valid && respMatches) {
-    busy := false.B
+    outstanding := false.B
   }
 
-  when(dbgCycle < 48.U) {
-    printf("[IFDBG] cycle=%d pcReg=%x reqPc=%x resetValid=%d resetPC=%x clear=%d busy=%d\n",
-      dbgCycle, pcReg, reqPcReg, io.resetValid, resetTarget, io.clear, busy)
+  when(ifDbg && dbgCycle < 48.U) {
+    printf("[IFDBG] cycle=%d pcReg=%x reqPc=%x resetValid=%d resetPC=%x clear=%d outstanding=%d\n",
+      dbgCycle, pcReg, reqPcReg, io.resetValid, resetTarget, io.clear, outstanding)
   }
 
   // Targeted debug around the redirect window to check fetch state and queue handshakes
-  when(dbgCycle >= 120.U && dbgCycle < 152.U) {
-    printf("[IFDBG2] cycle=%d pcReg=%x reqPc=%x busy=%d clear=%d resetValid=%d epoch=%d outEpoch=%d mem_req=%d mem_rdy=%d mem_rsp=%d q_enq_v=%d q_enq_r=%d q_deq_v=%d q_deq_r=%d\n",
-      dbgCycle, pcReg, reqPcReg, busy, io.clear, io.resetValid, epoch, outstandingEpoch,
+  when(ifDbg && dbgCycle >= 40.U && dbgCycle < 120.U) {
+    printf("[IFDBG2] cycle=%d pcReg=%x reqPc=%x outstanding=%d clear=%d resetValid=%d epoch=%d outEpoch=%d mem_req=%d mem_rdy=%d mem_rsp=%d q_enq_v=%d q_enq_r=%d q_deq_v=%d q_deq_r=%d\n",
+      dbgCycle, pcReg, reqPcReg, outstanding, io.clear, io.resetValid, epoch, outstandingEpoch,
       io.mem_iread_valid, io.mem_iout_ready, io.mem_iout_valid,
       q.io.enq.valid, q.io.enq.ready, q.io.deq.valid, q.io.deq.ready)
   }

@@ -9,8 +9,7 @@ class RSIssueBits extends Bundle {
   val op2_value = UInt(32.W)
   val op2_type = Bool() // true: immediate, false: register
   val dest_tag = UInt(5.W)
-}
-
+}                     
 class ReservationStations(entries: Int = 4) extends Module {
   require(entries > 0)
 
@@ -35,6 +34,10 @@ class ReservationStations(entries: Int = 4) extends Module {
     val cdb = Input(Valid(new CDBData))
     val rob_values = Input(Vec(32, new ROBValue()))
     val rf_regs = Input(Vec(32, RegisterEntry()))
+    val wb_valid = Input(Bool())
+    val wb_index = Input(UInt(5.W))
+    val wb_tag = Input(UInt(5.W))
+    val wb_value = Input(UInt(32.W))
     val fu_ready = Input(Bool())
     val issue_ready = Output(Bool())
     val exec_valid = Output(Bool())
@@ -82,9 +85,13 @@ class ReservationStations(entries: Int = 4) extends Module {
       e.op1_idx := io.issue_bits.op1_index
       // op1 resolve
       val rf1 = io.rf_regs(io.issue_bits.op1_index)
+      val wbOp1Hit = io.wb_valid && rf1.tag_valid && rf1.tag === io.wb_tag && io.wb_index === io.issue_bits.op1_index
       when(io.rob_values(rf1.tag).valid && rf1.tag_valid){
         e.op1_ready := true.B
         e.op1_val := io.rob_values(rf1.tag).value
+      }.elsewhen(wbOp1Hit) {
+        e.op1_ready := true.B
+        e.op1_val := io.wb_value
       }.otherwise {
         e.op1_ready := !rf1.tag_valid
         e.op1_val := rf1.value
@@ -98,9 +105,13 @@ class ReservationStations(entries: Int = 4) extends Module {
       }.otherwise {
         e.op2_idx := io.issue_bits.op2_index
         val rf2 = io.rf_regs(io.issue_bits.op2_index)
+        val wbOp2Hit = io.wb_valid && rf2.tag_valid && rf2.tag === io.wb_tag && io.wb_index === io.issue_bits.op2_index
         when(io.rob_values(rf2.tag).valid && rf2.tag_valid){
           e.op2_ready := true.B
           e.op2_val := io.rob_values(rf2.tag).value
+        }.elsewhen(wbOp2Hit) {
+          e.op2_ready := true.B
+          e.op2_val := io.wb_value
         }.otherwise {
           e.op2_ready := !rf2.tag_valid
           e.op2_val := rf2.value
@@ -184,7 +195,8 @@ class ReservationStations(entries: Int = 4) extends Module {
   // Targeted debug around the post-redirect window to see issue/exec handshakes
   val dbgCycle = RegInit(0.U(32.W))
   dbgCycle := dbgCycle + 1.U
-  when(dbgCycle >= 90.U && dbgCycle < 160.U) {
+  val rsDbg = false.B
+  when(rsDbg && dbgCycle >= 60.U && dbgCycle < 150.U) {
     printf("[RS] state cycle=%d head=%d tail=%d count=%d ready=%d fu_ready=%d head_rdy=%d\n",
       dbgCycle, headPtr, tailPtr, count, io.issue_ready, io.fu_ready, headReady)
     when(io.issue_valid) {

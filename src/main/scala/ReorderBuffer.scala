@@ -20,12 +20,14 @@ class ReorderBuffer(entries: Int = 32) extends Module {
 	// Debug cycle counter
 	private val dbgCycle = RegInit(0.U(32.W))
 	dbgCycle := dbgCycle + 1.U
+	private val enableRobDebug = dbgCycle < 180.U
 
 	class Entry extends Bundle {
 		val valid = Bool()
 		val ready = Bool()
 		val op = UInt(7.W)
 		val rd = UInt(5.W)
+		val pc = UInt(32.W)
 		val value = UInt(32.W)
 		val prediction = UInt(32.W)
 	}
@@ -55,6 +57,13 @@ class ReorderBuffer(entries: Int = 32) extends Module {
 		val commit_store = Output(Bool())
 		val clear = Output(Bool())
 		val pc_reset = Output(UInt(32.W))
+
+		// debug preview of head entry
+		val head_pc = Output(UInt(32.W))
+		val head_op = Output(UInt(7.W))
+		val head_rd = Output(UInt(5.W))
+		val head_valid = Output(Bool())
+		val head_ready = Output(Bool())
 	})
 
 	val head = RegInit(0.U(idxWidth.W))
@@ -83,6 +92,12 @@ class ReorderBuffer(entries: Int = 32) extends Module {
 	io.clear := clearReg
 	io.pc_reset := pcResetReg
 
+	io.head_pc := entriesReg(head).pc
+	io.head_op := entriesReg(head).op
+	io.head_rd := entriesReg(head).rd
+	io.head_valid := entriesReg(head).valid
+	io.head_ready := entriesReg(head).valid && entriesReg(head).ready
+
 	// broadcast table for RS
 	for (i <- 0 until entries) {
 		io.values(i).valid := entriesReg(i).valid && entriesReg(i).ready
@@ -92,16 +107,20 @@ class ReorderBuffer(entries: Int = 32) extends Module {
 	// issue phase
 	when(io.issue_valid && io.ready) {
 		entriesReg(tail).valid := true.B
-		// JALR needs its target from the ALU/CDB before the entry can be considered ready
-		val isJalrIssue = io.issue_bits.op === "b1100111".U
-		entriesReg(tail).ready := io.issue_has_value && !isJalrIssue
+		// Control ops like JALR must wait for the ALU to produce the target, so only mark non-JALR immediates ready here
+		entriesReg(tail).ready := io.issue_has_value && (io.issue_bits.op =/= "b1100111".U)
 		entriesReg(tail).op := io.issue_bits.op
 		entriesReg(tail).rd := io.issue_bits.rd
+		entriesReg(tail).pc := io.issue_bits.pc
 		entriesReg(tail).value := Mux(io.issue_has_value, io.issue_value, 0.U)
 		entriesReg(tail).prediction := io.issue_bits.prediction
 		pcResetTable(tail) := io.issue_bits.pc_reset
 		tail := tail + 1.U
 		count := count + 1.U
+
+		// Focused debug around the __umodsi3 window to ensure t0 (x5) is captured correctly
+		when(enableRobDebug && io.issue_bits.pc >= "h00001130".U && io.issue_bits.pc <= "h00001170".U) {
+		}
 
 		when(io.issue_bits.op === "b1100011".U || io.issue_bits.op === "b1100111".U) {
 			pcResetReg := io.issue_bits.pc_reset & (~3.U(32.W))
@@ -129,17 +148,22 @@ class ReorderBuffer(entries: Int = 32) extends Module {
 	val isJal = headEntry.op === "b1101111".U
 	val isCtrl = isBranch || isJalr || isJal
 	val isStore = headEntry.op === "b0100011".U
-	val headReady = count =/= 0.U && headEntry.valid && headEntry.ready
-
-	// Short debug: observe head status and pc_reset during early cycles
-	when(dbgCycle < 600.U) {
-		printf("[ROBDBG] cycle=%d head=%d tail=%d count=%d valid=%d ready=%d op=%b pc_reset_tbl=%x clear_out=%d pc_reset_out=%x\n",
-			dbgCycle, head, tail, count, headEntry.valid, headEntry.ready, headEntry.op, pcResetTable(head), io.clear, io.pc_reset)
+	val headReady = headEntry.valid && headEntry.ready
+	when(enableRobDebug && headReady && count === 0.U) {
 	}
 
-	// Debug: observe branch/jump commits and clears
-	when(headReady && isCtrl) {
-		printf("[ROB] head=%d op=%b value=%x pred=%x pc_reset=%x ready=%d count=%d\n", head, headEntry.op, headEntry.value, headEntry.prediction, pcResetTable(head), headEntry.ready, count)
+	when(enableRobDebug && headReady) {
+	}
+
+	val watchRd = headEntry.rd === 10.U || headEntry.rd === 11.U || headEntry.rd === 16.U || headEntry.rd === 17.U
+	when(headReady && watchRd && headEntry.rd =/= 0.U && !isStore) {
+		printf(p"[ROB-COMMIT] cyc=${dbgCycle} pc=0x${Hexadecimal(headEntry.pc)} rd=${headEntry.rd} val=0x${Hexadecimal(headEntry.value)} op=0x${Hexadecimal(headEntry.op)} pred=0x${Hexadecimal(headEntry.prediction)}\n")
+	}
+
+
+	// Targeted debug around the array_test2 hang window
+	val robDbg = enableRobDebug && dbgCycle >= 60.U && dbgCycle < 150.U
+	when(robDbg) {
 	}
 
 	// defaults for pulse outputs
@@ -152,9 +176,26 @@ class ReorderBuffer(entries: Int = 32) extends Module {
 	}
 
 	when(headReady) {
-		val mispredict = (isBranch && (headEntry.value =/= headEntry.prediction)) || isJal || isJalr
-		when(mispredict) {
-			printf("[ROB] mispredict head=%d op=%b value=%x pred=%x pc_reset=%x\n", head, headEntry.op, headEntry.value, headEntry.prediction, pcResetTable(head))
+		val branchMispredict = isBranch && (headEntry.value =/= headEntry.prediction)
+		val jumpRedirect = !branchMispredict && (isJal || isJalr)
+
+		when(branchMispredict) {
+			clearReg := true.B
+			when(headEntry.rd =/= 0.U && !isStore) {
+				writebackValidReg := true.B
+				writebackIndexReg := headEntry.rd
+				writebackTagReg := head
+				writebackValueReg := headEntry.value
+			}
+			for (i <- 0 until entries) {
+				entriesReg(i).valid := false.B
+				entriesReg(i).ready := false.B
+			}
+			head := 0.U
+			tail := 0.U
+			count := 0.U
+		}.elsewhen(jumpRedirect) {
+			// Redirect to jump target; retire the head and flush everything else (treat like a control mispredict)
 			clearReg := true.B
 			when(headEntry.rd =/= 0.U && !isStore) {
 				writebackValidReg := true.B
@@ -181,7 +222,7 @@ class ReorderBuffer(entries: Int = 32) extends Module {
 			}
 			entriesReg(head).valid := false.B
 			entriesReg(head).ready := false.B
-			count := count - 1.U
+			count := Mux(count === 0.U, 0.U, count - 1.U)
 			head := head + 1.U
 		}
 	}

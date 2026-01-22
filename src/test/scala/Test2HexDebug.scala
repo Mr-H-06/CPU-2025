@@ -4,31 +4,32 @@ import org.scalatest.flatspec.AnyFlatSpec
 
 class Test2HexDebug extends AnyFlatSpec with ChiselScalatestTester {
   "Core" should "run test2.hex and report progress" in {
-    test(new Core(initFile = "src/test/resources/test2.hex", memSize = 8192, memDelay = 4)) { c =>
+    test(new Core(initFile = "src/test/resources/array_test2.data", memSize = 131072, memDelay = 4)) { c =>
       c.clock.setTimeout(0)
       var cycles = 0
       var halted = false
       var lastPc: BigInt = -1
       var stagnant = 0
-      val maxCycles = 2000 // allow program to halt while collecting debug traces
-      val maxStagnant = 50 // fail fast on suspected dead loop
+      // array_test1 runs through division/mod routines and emits many control-flow redirects;
+      // give it more headroom so we can observe a clean halt without tripping the debug guard.
+      val maxCycles = 100000
+      val maxStagnant = 50
 
       while (cycles < maxCycles && !halted) {
         val pc = c.io.debug_pc.peek().litValue
         val haltedNow = c.io.halted.peek().litToBoolean
-        val cdb = c.io.debug_cdb_rob
+        val regs = c.io.debug_regs.map(_.peek().litValue)
         if (pc == lastPc) stagnant += 1 else stagnant = 0
         lastPc = pc
 
         val pcHex = f"0x${pc.toLong}%08x"
-        // Print PC plus CDB activity to illustrate execute/complete order vs fetch order
-        val cdbMsg = if (cdb.valid.peek().litToBoolean) {
-          val idx = cdb.bits.index.peek().litValue.toInt
-          val value = cdb.bits.value.peek().litValue
-          f" cdb(tag=$idx,value=0x$value%08x)"
-        } else ""
+        val regMsg = {
+          val nonZero = regs.zipWithIndex.collect { case (v, i) if v != 0 => f"x$i=$v%08x" }
+          if (nonZero.nonEmpty) " regs=" + nonZero.mkString(" ") else " regs=all_zero"
+        }
 
-        println(f"[cycle $cycles%4d] pc=$pcHex halted=$haltedNow stagnant=$stagnant$cdbMsg")
+        // Only output cycle, PC, regs
+        println(f"[cycle $cycles%5d] pc=$pcHex$regMsg")
 
         if (stagnant >= maxStagnant) {
           fail(s"PC stuck at $pcHex for $stagnant cycles (possible dead loop)")

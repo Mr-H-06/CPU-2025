@@ -101,10 +101,14 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
     loadMemoryFromFile(mem, tempFile)
   }
 
-  val instruction0 = RegNext(mem.read(Mux(io.iread.valid, io.iread.address, 0.U) + 0.U), 0.U)
-  val instruction1 = RegNext(mem.read(Mux(io.iread.valid, io.iread.address, 0.U) + 1.U), 0.U)
-  val instruction2 = RegNext(mem.read(Mux(io.iread.valid, io.iread.address, 0.U) + 2.U), 0.U)
-  val instruction3 = RegNext(mem.read(Mux(io.iread.valid, io.iread.address, 0.U) + 3.U), 0.U)
+  val addrWidth = log2Ceil(memSize)
+  def maskAddr(addr: UInt): UInt = addr(addrWidth - 1, 0)
+
+  val iaddr = maskAddr(Mux(io.iread.valid, io.iread.address, 0.U))
+  val instruction0 = RegNext(mem.read(iaddr + 0.U), 0.U)
+  val instruction1 = RegNext(mem.read(iaddr + 1.U), 0.U)
+  val instruction2 = RegNext(mem.read(iaddr + 2.U), 0.U)
+  val instruction3 = RegNext(mem.read(iaddr + 3.U), 0.U)
   
   val iReadyReg = RegInit(true.B)
   val iValidReg = RegInit(false.B)
@@ -125,10 +129,11 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
   val cnt = new Counter(delay)
   val memInput = RegInit(0.U.asTypeOf(new Valid(new MemInput)))
   val memOutput = RegInit(0.U.asTypeOf(new CDBData))
-  val data0 = RegNext(mem.read(memInput.bits.address + 0.U), 0.U)
-  val data1 = RegNext(mem.read(memInput.bits.address + 1.U), 0.U)
-  val data2 = RegNext(mem.read(memInput.bits.address + 2.U), 0.U)
-  val data3 = RegNext(mem.read(memInput.bits.address + 3.U), 0.U)
+  val dataAddr = maskAddr(memInput.bits.address)
+  val data0 = RegNext(mem.read(dataAddr + 0.U), 0.U)
+  val data1 = RegNext(mem.read(dataAddr + 1.U), 0.U)
+  val data2 = RegNext(mem.read(dataAddr + 2.U), 0.U)
+  val data3 = RegNext(mem.read(dataAddr + 3.U), 0.U)
 
   val mValidReg = RegInit(false.B)
   mValidReg := false.B
@@ -143,25 +148,19 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
   }.otherwise {
     when (io.memAccess.valid && !memInput.valid) {
       val addr = io.memAccess.bits.address
-      val inRange = addr < memSize.U
-      val inRangeWord = (addr + 3.U) < memSize.U
+      val addrMasked = maskAddr(addr)
       val watchAddr = "h000011a0".U
       when (io.memAccess.bits.op === MemOpEnum.lb  || 
             io.memAccess.bits.op === MemOpEnum.lbu || 
             io.memAccess.bits.op === MemOpEnum.lh  || 
             io.memAccess.bits.op === MemOpEnum.lhu || 
             io.memAccess.bits.op === MemOpEnum.lw) {
-        // Load: buffer the request and start the delay counter (ignore out-of-range)
-        when(inRange) {
-          memInput := io.memAccess
-          cnt.inc()
-          when(addr === watchAddr) {
-            printf(p"[MEM-REQ] cyc=${dbgCycle} load op=${io.memAccess.bits.op.asUInt} addr=0x${Hexadecimal(addr)} idx=${io.memAccess.bits.index}\n")
-          }
-        }.otherwise {
-          memOutput.index := io.memAccess.bits.index
-          memOutput.value := 0.U
-          mValidReg := true.B
+        // Load: buffer the request and start the delay counter
+        memInput := io.memAccess
+        memInput.bits.address := addrMasked
+        cnt.inc()
+        when(addr === watchAddr) {
+          printf(p"[MEM-REQ] cyc=${dbgCycle} load op=${io.memAccess.bits.op.asUInt} addr=0x${Hexadecimal(addr)} idx=${io.memAccess.bits.index}\n")
         }
       }.otherwise {
         // Store: only apply when the ROB head commits the store
@@ -175,23 +174,17 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
           }
           switch (io.memAccess.bits.op) {
             is (MemOpEnum.sb) {
-              when(inRange) {
-                mem.write(addr, io.memAccess.bits.value(7, 0))
-              }
+              mem.write(addrMasked, io.memAccess.bits.value(7, 0))
             }
             is (MemOpEnum.sh) {
-              when(inRange && (addr + 1.U) < memSize.U) {
-                mem.write(addr, io.memAccess.bits.value(7, 0))
-                mem.write(addr + 1.U, io.memAccess.bits.value(15, 8))
-              }
+              mem.write(addrMasked, io.memAccess.bits.value(7, 0))
+              mem.write(addrMasked + 1.U, io.memAccess.bits.value(15, 8))
             }
             is (MemOpEnum.sw) {
-              when(inRangeWord) {
-                mem.write(addr, io.memAccess.bits.value(7, 0))
-                mem.write(addr + 1.U, io.memAccess.bits.value(15, 8))
-                mem.write(addr + 2.U, io.memAccess.bits.value(23, 16))
-                mem.write(addr + 3.U, io.memAccess.bits.value(31, 24))
-              }
+              mem.write(addrMasked, io.memAccess.bits.value(7, 0))
+              mem.write(addrMasked + 1.U, io.memAccess.bits.value(15, 8))
+              mem.write(addrMasked + 2.U, io.memAccess.bits.value(23, 16))
+              mem.write(addrMasked + 3.U, io.memAccess.bits.value(31, 24))
             }
           }
           // Keep memInput free so subsequent memory ops are not blocked

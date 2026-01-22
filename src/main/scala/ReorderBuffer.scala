@@ -108,7 +108,7 @@ class ReorderBuffer(entries: Int = 32) extends Module {
 	when(io.issue_valid && io.ready) {
 		entriesReg(tail).valid := true.B
 		// Control ops like JALR must wait for the ALU to produce the target, so only mark non-JALR immediates ready here
-		entriesReg(tail).ready := io.issue_has_value && (io.issue_bits.op =/= "b1100111".U)
+		entriesReg(tail).ready := io.issue_has_value && (io.issue_bits.op =/= "b1100111".U || io.issue_bits.pc_reset =/= 0.U)
 		entriesReg(tail).op := io.issue_bits.op
 		entriesReg(tail).rd := io.issue_bits.rd
 		entriesReg(tail).pc := io.issue_bits.pc
@@ -153,11 +153,6 @@ class ReorderBuffer(entries: Int = 32) extends Module {
 	}
 
 	when(enableRobDebug && headReady) {
-	}
-
-	val watchRd = headEntry.rd === 10.U || headEntry.rd === 11.U || headEntry.rd === 16.U || headEntry.rd === 17.U
-	when(headReady && watchRd && headEntry.rd =/= 0.U && !isStore) {
-		printf(p"[ROB-COMMIT] cyc=${dbgCycle} pc=0x${Hexadecimal(headEntry.pc)} rd=${headEntry.rd} val=0x${Hexadecimal(headEntry.value)} op=0x${Hexadecimal(headEntry.op)} pred=0x${Hexadecimal(headEntry.prediction)}\n")
 	}
 
 

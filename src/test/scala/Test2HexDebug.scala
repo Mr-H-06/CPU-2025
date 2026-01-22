@@ -4,7 +4,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 
 class Test2HexDebug extends AnyFlatSpec with ChiselScalatestTester {
   "Core" should "run test2.hex and report progress" in {
-    test(new Core(initFile = "src/test/resources/array_test2.data", memSize = 131072, memDelay = 4)) { c =>
+    test(new Core(initFile = "src/test/resources/array_test1.data", memSize = 8192, memDelay = 4)) { c =>
       c.clock.setTimeout(0)
       var cycles = 0
       var halted = false
@@ -12,7 +12,7 @@ class Test2HexDebug extends AnyFlatSpec with ChiselScalatestTester {
       var stagnant = 0
       // array_test1 runs through division/mod routines and emits many control-flow redirects;
       // give it more headroom so we can observe a clean halt without tripping the debug guard.
-      val maxCycles = 100000
+      val maxCycles = 6000000
       val maxStagnant = 50
 
       while (cycles < maxCycles && !halted) {

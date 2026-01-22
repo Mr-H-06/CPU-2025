@@ -35,9 +35,6 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4, startP
   val dbgCycle = RegInit(0.U(32.W))
   dbgCycle := dbgCycle + 1.U
 
-  // Toggle to silence targeted JALR debug printfs unless explicitly enabled
-  private val enableJalrDebug = false.B
-
   // Watchdog removed
 
   val globalClear = reset.asBool || rob.io.clear
@@ -230,24 +227,17 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4, startP
       val rs1Value = Mux(useRaAsLink, raValue, rs1ValueBase)
       val jalrTarget = (rs1Value + imm) & (~3.U(32.W))
 
-      willFire := canIssue && issueReadyALU && rs1Ready
-      rs.io.issue_valid := willFire
-      rs.io.issue_bits.op := AluOpEnum.ADD // compute rs1 + imm (ALU will broadcast target)
-      // Force op1 to RA when the guard triggers so the computed target matches the protected link
-      rs.io.issue_bits.op1_index := Mux(useRaAsLink, 1.U, rs1)
-      rs.io.issue_bits.op2_index := 0.U
-      rs.io.issue_bits.op2_value := imm
-      rs.io.issue_bits.op2_type := true.B
-      rs.io.issue_bits.dest_tag := rob.io.tail
+      // JALR target can be computed here once rs1 is ready; avoid relying on a later CDB broadcast.
+      willFire := canIssue && issueReadySimple && rs1Ready
 
       robHasValue := true.B            // rd gets pc+4
       robValue := pc + 4.U
-      robPcReset := 0.U                // target comes from ALU broadcast into ROB table
+      robPcReset := jalrTarget         // redirect target available at issue time
       robPrediction := 0.U
       writeDest := rd =/= 0.U
 
       // Targeted debug to catch the stuck JALR loop near __umodsi3
-      when(enableJalrDebug && canIssue && instr.pc >= "h000010f0".U && instr.pc <= "h00001180".U) {
+      when(canIssue && instr.pc >= "h000010f0".U && instr.pc <= "h00001180".U) {
         printf("[JALR-DBG] cycle=%d pc=%x rs1=%d rs1_ready=%d rs1_tag_v=%d rs1_tag=%d rs1_val=%x rs1_base=%x ra_val=%x useRA=%d imm=%x target=%x issueReadyALU=%d clear=%d\n",
           dbgCycle, pc, rs1, rs1Ready, rs1Entry.tag_valid, rs1Entry.tag, rs1Value, rs1ValueBase, raValue, useRaAsLink, imm, jalrTarget, issueReadyALU, globalClear)
       }

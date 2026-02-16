@@ -19,6 +19,19 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4, startP
     val debug_rob_head_rd = Output(UInt(5.W))
     val debug_rob_head_valid = Output(Bool())
     val debug_rob_head_ready = Output(Bool())
+
+    // ROB commit/writeback preview for tracing
+    val debug_wb_valid = Output(Bool())
+    val debug_wb_index = Output(UInt(5.W))
+    val debug_wb_value = Output(UInt(32.W))
+    val debug_commit_store = Output(Bool())
+    val debug_commit_valid = Output(Bool())
+    val debug_commit_pc = Output(UInt(32.W))
+    val debug_commit_op = Output(UInt(7.W))
+    val debug_commit_rd = Output(UInt(5.W))
+    val debug_commit_is_store = Output(Bool())
+    val debug_commit_value = Output(UInt(32.W))
+    val debug_commit_tag = Output(UInt(5.W))
   })
 
   // Modules
@@ -80,6 +93,17 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4, startP
   io.debug_rob_head_valid := rob.io.head_valid
   io.debug_rob_head_ready := rob.io.head_ready
   io.debug_mem_ready := mem.io.memValue.ready
+  io.debug_wb_valid := rob.io.writeback_valid
+  io.debug_wb_index := rob.io.writeback_index
+  io.debug_wb_value := rob.io.writeback_value
+  io.debug_commit_store := rob.io.commit_store
+  io.debug_commit_valid := rob.io.commit_valid
+  io.debug_commit_pc := rob.io.commit_pc
+  io.debug_commit_op := rob.io.commit_op
+  io.debug_commit_rd := rob.io.commit_rd
+  io.debug_commit_is_store := rob.io.commit_is_store
+  io.debug_commit_value := rob.io.commit_value
+  io.debug_commit_tag := rob.io.commit_tag
 
   // Reservation Stations (ALU)
   rs.io.clear := globalClear
@@ -278,6 +302,10 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4, startP
         "b100".U -> MemOpEnum.lbu,
         "b101".U -> MemOpEnum.lhu
       ))
+      when(willFire && pc === "h00000130".U) {
+        val rs1Entry = rf.io.lsb_regs(rs1)
+        printf(p"[LD-ISSUE] cyc=${dbgCycle} pc=0x${Hexadecimal(pc)} rs1=x${rs1} tag_v=${rs1Entry.tag_valid} tag=${rs1Entry.tag} val=0x${Hexadecimal(rs1Entry.value)} imm=0x${Hexadecimal(imm)}\n")
+      }
     }
     is("b0100011".U) { // STORE
       willFire := canIssue && issueReadyLSB
@@ -381,8 +409,9 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4, startP
 
   // Halt detection: sb x0, -1(x0) with byte 0 (legacy) or store byte to 0x30004 (MMIO halt)
   val haltReg = RegInit(false.B)
-  val isEcall = opcode === "b1110011".U && funct3 === 0.U && instr.rs1 === 0.U && instr.rs2 === 0.U && funct7 === 0.U
-  when(isEcall && instrValid) { haltReg := true.B }
+  val isEcall = opcode === "b1110011".U && funct3 === 0.U && instr.rs1 === 0.U && instr.rs2 === 0.U && funct7 === 0.U && instr.instr(31, 20) === 0.U
+  val isEbreak = opcode === "b1110011".U && funct3 === 0.U && instr.rs1 === 0.U && instr.rs2 === 0.U && funct7 === 0.U && instr.instr(31, 20) === 1.U
+  when((isEcall || isEbreak) && instrValid) { haltReg := true.B }
   val isSb = lsb.io.exec_bits.op === MemOpEnum.sb
   val sbAddr = lsb.io.exec_bits.address
   val sbByte0 = lsb.io.exec_bits.value & 0xFF.U

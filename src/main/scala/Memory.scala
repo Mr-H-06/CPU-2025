@@ -128,6 +128,7 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
   
   val cnt = new Counter(delay)
   val memInput = RegInit(0.U.asTypeOf(new Valid(new MemInput)))
+  val storePending = RegInit(0.U.asTypeOf(new Valid(new MemInput)))
   val memOutput = RegInit(0.U.asTypeOf(new CDBData))
   val dataAddr = maskAddr(memInput.bits.address)
   val data0 = RegNext(mem.read(dataAddr + 0.U), 0.U)
@@ -138,38 +139,77 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
   val mValidReg = RegInit(false.B)
   mValidReg := false.B
 
-  io.memValue.ready := !memInput.valid
+  io.memValue.ready := !memInput.valid && !storePending.valid
   io.memValue.data.valid := mValidReg
   io.memValue.data.bits := memOutput
 
   when (io.clear) {
     cnt.reset()
     memInput := 0.U.asTypeOf(new Valid(new MemInput))
+    storePending := 0.U.asTypeOf(new Valid(new MemInput))
   }.otherwise {
-    when (io.memAccess.valid && !memInput.valid) {
+    val watchAddr = "h000011a0".U
+    val watchAddrStack = "h0001ffa4".U
+    val watchAddrStackMasked = maskAddr(watchAddrStack)
+    val stackLo = "h0001f000".U
+    val stackHi = "h00020000".U
+
+    // Buffer a store if a load is in flight
+    when(io.memAccess.valid && memInput.valid &&
+         io.memAccess.bits.op.isOneOf(MemOpEnum.sb, MemOpEnum.sh, MemOpEnum.sw)) {
+      assert(io.commit, "Store issued without commit_store")
+      when(io.commit && !storePending.valid) {
+        storePending.valid := true.B
+        storePending.bits := io.memAccess.bits
+        storePending.bits.address := maskAddr(io.memAccess.bits.address)
+      }
+    }
+
+    // Drain pending store when memory is free
+    when(storePending.valid && !memInput.valid) {
+      val addr = storePending.bits.address
+      val addrMasked = maskAddr(addr)
+      memOutput.index := storePending.bits.index
+      memOutput.value := 0.U
+      mValidReg := true.B
+      switch (storePending.bits.op) {
+        is (MemOpEnum.sb) {
+          mem.write(addrMasked, storePending.bits.value(7, 0))
+        }
+        is (MemOpEnum.sh) {
+          mem.write(addrMasked, storePending.bits.value(7, 0))
+          mem.write(addrMasked + 1.U, storePending.bits.value(15, 8))
+        }
+        is (MemOpEnum.sw) {
+          mem.write(addrMasked, storePending.bits.value(7, 0))
+          mem.write(addrMasked + 1.U, storePending.bits.value(15, 8))
+          mem.write(addrMasked + 2.U, storePending.bits.value(23, 16))
+          mem.write(addrMasked + 3.U, storePending.bits.value(31, 24))
+        }
+      }
+      storePending.valid := false.B
+    }
+
+    // Accept a new memory request when free (no load in flight, no pending store)
+    when(io.memAccess.valid && !memInput.valid && !storePending.valid) {
       val addr = io.memAccess.bits.address
       val addrMasked = maskAddr(addr)
-      val watchAddr = "h000011a0".U
-      when (io.memAccess.bits.op === MemOpEnum.lb  || 
-            io.memAccess.bits.op === MemOpEnum.lbu || 
-            io.memAccess.bits.op === MemOpEnum.lh  || 
-            io.memAccess.bits.op === MemOpEnum.lhu || 
-            io.memAccess.bits.op === MemOpEnum.lw) {
-        // Load: buffer the request and start the delay counter
+      val isStackAddr = addr >= stackLo && addr < stackHi
+      when(io.memAccess.bits.op.isOneOf(MemOpEnum.lb, MemOpEnum.lbu, MemOpEnum.lh, MemOpEnum.lhu, MemOpEnum.lw)) {
         memInput := io.memAccess
         memInput.bits.address := addrMasked
+        cnt.reset()
         cnt.inc()
-        when(addr === watchAddr) {
+        when(addr === watchAddr || addr === watchAddrStack || isStackAddr) {
           printf(p"[MEM-REQ] cyc=${dbgCycle} load op=${io.memAccess.bits.op.asUInt} addr=0x${Hexadecimal(addr)} idx=${io.memAccess.bits.index}\n")
         }
       }.otherwise {
-        // Store: only apply when the ROB head commits the store
         assert(io.commit, "Store issued without commit_store")
         when(io.commit) {
           memOutput.index := io.memAccess.bits.index
           memOutput.value := 0.U
           mValidReg := true.B
-          when(addr === watchAddr) {
+          when(addr === watchAddr || addr === watchAddrStack || isStackAddr) {
             printf(p"[MEM-REQ] cyc=${dbgCycle} store op=${io.memAccess.bits.op.asUInt} addr=0x${Hexadecimal(addr)} val=0x${Hexadecimal(io.memAccess.bits.value)} idx=${io.memAccess.bits.index}\n")
           }
           switch (io.memAccess.bits.op) {
@@ -187,23 +227,17 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
               mem.write(addrMasked + 3.U, io.memAccess.bits.value(31, 24))
             }
           }
-          // Keep memInput free so subsequent memory ops are not blocked
-          memInput.valid := false.B
         }
       }
     }
-    when (memInput.valid) {
-      when (cnt.value =/= 0.U) { // load
-        assert (memInput.bits.op === MemOpEnum.lb  || 
-                memInput.bits.op === MemOpEnum.lbu || 
-                memInput.bits.op === MemOpEnum.lh  || 
-                memInput.bits.op === MemOpEnum.lhu || 
-                memInput.bits.op === MemOpEnum.lw)
-        when (cnt.inc()) { // output
+
+    // Produce load response after delay
+    when(memInput.valid) {
+      when(cnt.value =/= 0.U) {
+        when(cnt.inc()) {
           memInput.valid := false.B
           mValidReg := true.B
           memOutput.index := memInput.bits.index
-          val watchAddr = "h000011a0".U
           switch (memInput.bits.op) {
             is (MemOpEnum.lb) {
               memOutput.value := Cat(Fill(24, data0(7)), data0)
@@ -221,12 +255,10 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
               memOutput.value := Cat(data3, data2, data1, data0)
             }
           }
-          when(memInput.bits.address === watchAddr) {
+          when(memInput.bits.address === watchAddr || memInput.bits.address === watchAddrStackMasked || (memInput.bits.address >= maskAddr(stackLo) && memInput.bits.address < maskAddr(stackHi))) {
             printf(p"[MEM-RSP] cyc=${dbgCycle} load addr=0x${Hexadecimal(memInput.bits.address)} val=0x${Hexadecimal(memOutput.value)} idx=${memOutput.index}\n")
           }
         }
-      }.otherwise { // store requests no longer wait for commit; handled when accepted
-        memInput.valid := false.B
       }
     }
   }

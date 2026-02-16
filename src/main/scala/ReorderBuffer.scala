@@ -64,6 +64,15 @@ class ReorderBuffer(entries: Int = 32) extends Module {
 		val head_rd = Output(UInt(5.W))
 		val head_valid = Output(Bool())
 		val head_ready = Output(Bool())
+
+		// commit trace outputs
+		val commit_valid = Output(Bool())
+		val commit_pc = Output(UInt(32.W))
+		val commit_op = Output(UInt(7.W))
+		val commit_rd = Output(UInt(5.W))
+		val commit_is_store = Output(Bool())
+		val commit_value = Output(UInt(32.W))
+		val commit_tag = Output(UInt(idxWidth.W))
 	})
 
 	val head = RegInit(0.U(idxWidth.W))
@@ -97,6 +106,21 @@ class ReorderBuffer(entries: Int = 32) extends Module {
 	io.head_rd := entriesReg(head).rd
 	io.head_valid := entriesReg(head).valid
 	io.head_ready := entriesReg(head).valid && entriesReg(head).ready
+
+	val commitValidReg = RegInit(false.B)
+	val commitPcReg = RegInit(0.U(32.W))
+	val commitOpReg = RegInit(0.U(7.W))
+	val commitRdReg = RegInit(0.U(5.W))
+	val commitIsStoreReg = RegInit(false.B)
+	val commitValueReg = RegInit(0.U(32.W))
+	val commitTagReg = RegInit(0.U(idxWidth.W))
+	io.commit_valid := commitValidReg
+	io.commit_pc := commitPcReg
+	io.commit_op := commitOpReg
+	io.commit_rd := commitRdReg
+	io.commit_is_store := commitIsStoreReg
+	io.commit_value := commitValueReg
+	io.commit_tag := commitTagReg
 
 	// broadcast table for RS
 	for (i <- 0 until entries) {
@@ -165,12 +189,23 @@ class ReorderBuffer(entries: Int = 32) extends Module {
 	writebackValidReg := false.B
 	commitStoreReg := false.B
 	clearReg := false.B
+	commitValidReg := false.B
+	commitIsStoreReg := false.B
+	commitTagReg := 0.U
 
 	when(headReady && isCtrl) {
 		pcResetReg := pcResetTable(head) & (~3.U(32.W))
 	}
 
 	when(headReady) {
+		commitValidReg := true.B
+		commitPcReg := headEntry.pc
+		commitOpReg := headEntry.op
+		commitRdReg := headEntry.rd
+		commitValueReg := headEntry.value
+		commitIsStoreReg := isStore
+		commitTagReg := head
+
 		val branchMispredict = isBranch && (headEntry.value =/= headEntry.prediction)
 		val jumpRedirect = !branchMispredict && (isJal || isJalr)
 

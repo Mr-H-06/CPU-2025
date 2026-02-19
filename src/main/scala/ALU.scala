@@ -80,11 +80,4 @@ class ALU extends Module {
       resultValidReg := false.B
     }
   }
-
-  // Targeted debug to trace compare operations during array_test2 hang
-  val aluDbg = dbgCycle >= 4600.U && dbgCycle < 4910.U
-  when(aluDbg && io.exec_valid && (io.exec_bits.op === AluOpEnum.GE || io.exec_bits.op === AluOpEnum.GEU)) {
-    printf("[ALUDBG] cycle=%d op=%d op1=%x op2=%x res=%x tag=%d\n",
-      dbgCycle, io.exec_bits.op.asUInt, io.exec_bits.op1, io.exec_bits.op2, resultBitsReg.value, io.exec_bits.tag)
-  }
 }

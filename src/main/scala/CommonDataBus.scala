@@ -14,7 +14,8 @@ class CommonDataBus extends Module {
   
   // Small FIFO that can accept up to two inputs per cycle and
   // outputs at most one per cycle (broadcast bus).
-  val depth = 32
+  // No backpressure on producers; use a deep queue to minimize result drops on long programs.
+  val depth = 2048
   val idxWidth = log2Ceil(depth)
   val fifo = withReset(io.clear)(RegInit(VecInit(Seq.fill(depth)(0.U.asTypeOf(new CDBData)))))
   val head = withReset(io.clear)(RegInit(0.U(idxWidth.W)))

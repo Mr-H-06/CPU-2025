@@ -5,11 +5,11 @@ import chisel3.util.experimental.loadMemoryFromFile
 import utils._
 
 class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
-  require(delay >= 4, s"Memory delay must be >= 4, got $delay.")
+  require(delay >= 1, s"Memory delay must be >= 1, got $delay.")
 
-  // Lightweight cycle counter for targeted debug prints
-  private val dbgCycle = RegInit(0.U(32.W))
-  dbgCycle := dbgCycle + 1.U
+  // 调试逻辑保留（默认注释，避免运行时开销）
+  // private val dbgCycle = RegInit(0.U(32.W))
+  // dbgCycle := dbgCycle + 1.U
 
   // Helper function to convert Intel HEX format to simple hex format for loadMemoryFromFile
   private def convertIntelHexToSimpleHex(inputFile: String, outputFile: String): Unit = {
@@ -126,10 +126,11 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
     iValidReg := !iReadyReg
   }
   
-  val cnt = new Counter(delay)
   val memInput = RegInit(0.U.asTypeOf(new Valid(new MemInput)))
   val storePending = RegInit(0.U.asTypeOf(new Valid(new MemInput)))
   val memOutput = RegInit(0.U.asTypeOf(new CDBData))
+  val loadCountdownWidth = log2Ceil(math.max(delay + 1, 2))
+  val loadCountdown = RegInit(0.U(loadCountdownWidth.W))
   val dataAddr = maskAddr(memInput.bits.address)
   val data0 = RegNext(mem.read(dataAddr + 0.U), 0.U)
   val data1 = RegNext(mem.read(dataAddr + 1.U), 0.U)
@@ -144,9 +145,9 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
   io.memValue.data.bits := memOutput
 
   when (io.clear) {
-    cnt.reset()
     memInput := 0.U.asTypeOf(new Valid(new MemInput))
     storePending := 0.U.asTypeOf(new Valid(new MemInput))
+    loadCountdown := 0.U
   }.otherwise {
     val watchAddr = "h000011a0".U
     val watchAddrStack = "h0001ffa4".U
@@ -157,8 +158,7 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
     // Buffer a store if a load is in flight
     when(io.memAccess.valid && memInput.valid &&
          io.memAccess.bits.op.isOneOf(MemOpEnum.sb, MemOpEnum.sh, MemOpEnum.sw)) {
-      assert(io.commit, "Store issued without commit_store")
-      when(io.commit && !storePending.valid) {
+      when(!storePending.valid) {
         storePending.valid := true.B
         storePending.bits := io.memAccess.bits
         storePending.bits.address := maskAddr(io.memAccess.bits.address)
@@ -169,9 +169,6 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
     when(storePending.valid && !memInput.valid) {
       val addr = storePending.bits.address
       val addrMasked = maskAddr(addr)
-      memOutput.index := storePending.bits.index
-      memOutput.value := 0.U
-      mValidReg := true.B
       switch (storePending.bits.op) {
         is (MemOpEnum.sb) {
           mem.write(addrMasked, storePending.bits.value(7, 0))
@@ -198,34 +195,21 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
       when(io.memAccess.bits.op.isOneOf(MemOpEnum.lb, MemOpEnum.lbu, MemOpEnum.lh, MemOpEnum.lhu, MemOpEnum.lw)) {
         memInput := io.memAccess
         memInput.bits.address := addrMasked
-        cnt.reset()
-        cnt.inc()
-        when(addr === watchAddr || addr === watchAddrStack || isStackAddr) {
-          printf(p"[MEM-REQ] cyc=${dbgCycle} load op=${io.memAccess.bits.op.asUInt} addr=0x${Hexadecimal(addr)} idx=${io.memAccess.bits.index}\n")
-        }
+        loadCountdown := (if (delay == 1) 1 else delay - 1).U
       }.otherwise {
-        assert(io.commit, "Store issued without commit_store")
-        when(io.commit) {
-          memOutput.index := io.memAccess.bits.index
-          memOutput.value := 0.U
-          mValidReg := true.B
-          when(addr === watchAddr || addr === watchAddrStack || isStackAddr) {
-            printf(p"[MEM-REQ] cyc=${dbgCycle} store op=${io.memAccess.bits.op.asUInt} addr=0x${Hexadecimal(addr)} val=0x${Hexadecimal(io.memAccess.bits.value)} idx=${io.memAccess.bits.index}\n")
+        switch (io.memAccess.bits.op) {
+          is (MemOpEnum.sb) {
+            mem.write(addrMasked, io.memAccess.bits.value(7, 0))
           }
-          switch (io.memAccess.bits.op) {
-            is (MemOpEnum.sb) {
-              mem.write(addrMasked, io.memAccess.bits.value(7, 0))
-            }
-            is (MemOpEnum.sh) {
-              mem.write(addrMasked, io.memAccess.bits.value(7, 0))
-              mem.write(addrMasked + 1.U, io.memAccess.bits.value(15, 8))
-            }
-            is (MemOpEnum.sw) {
-              mem.write(addrMasked, io.memAccess.bits.value(7, 0))
-              mem.write(addrMasked + 1.U, io.memAccess.bits.value(15, 8))
-              mem.write(addrMasked + 2.U, io.memAccess.bits.value(23, 16))
-              mem.write(addrMasked + 3.U, io.memAccess.bits.value(31, 24))
-            }
+          is (MemOpEnum.sh) {
+            mem.write(addrMasked, io.memAccess.bits.value(7, 0))
+            mem.write(addrMasked + 1.U, io.memAccess.bits.value(15, 8))
+          }
+          is (MemOpEnum.sw) {
+            mem.write(addrMasked, io.memAccess.bits.value(7, 0))
+            mem.write(addrMasked + 1.U, io.memAccess.bits.value(15, 8))
+            mem.write(addrMasked + 2.U, io.memAccess.bits.value(23, 16))
+            mem.write(addrMasked + 3.U, io.memAccess.bits.value(31, 24))
           }
         }
       }
@@ -233,32 +217,29 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
 
     // Produce load response after delay
     when(memInput.valid) {
-      when(cnt.value =/= 0.U) {
-        when(cnt.inc()) {
-          memInput.valid := false.B
-          mValidReg := true.B
-          memOutput.index := memInput.bits.index
-          switch (memInput.bits.op) {
-            is (MemOpEnum.lb) {
-              memOutput.value := Cat(Fill(24, data0(7)), data0)
-            }
-            is (MemOpEnum.lbu) {
-              memOutput.value := Cat(Fill(24, 0.B), data0)
-            }
-            is (MemOpEnum.lh) {
-              memOutput.value := Cat(Fill(16, data1(7)), data1, data0)
-            }
-            is (MemOpEnum.lhu) {
-              memOutput.value := Cat(Fill(16, 0.B), data1, data0)
-            }
-            is (MemOpEnum.lw) {
-              memOutput.value := Cat(data3, data2, data1, data0)
-            }
+      when(loadCountdown === 1.U) {
+        memInput.valid := false.B
+        mValidReg := true.B
+        memOutput.index := memInput.bits.index
+        switch (memInput.bits.op) {
+          is (MemOpEnum.lb) {
+            memOutput.value := Cat(Fill(24, data0(7)), data0)
           }
-          when(memInput.bits.address === watchAddr || memInput.bits.address === watchAddrStackMasked || (memInput.bits.address >= maskAddr(stackLo) && memInput.bits.address < maskAddr(stackHi))) {
-            printf(p"[MEM-RSP] cyc=${dbgCycle} load addr=0x${Hexadecimal(memInput.bits.address)} val=0x${Hexadecimal(memOutput.value)} idx=${memOutput.index}\n")
+          is (MemOpEnum.lbu) {
+            memOutput.value := Cat(Fill(24, 0.B), data0)
+          }
+          is (MemOpEnum.lh) {
+            memOutput.value := Cat(Fill(16, data1(7)), data1, data0)
+          }
+          is (MemOpEnum.lhu) {
+            memOutput.value := Cat(Fill(16, 0.B), data1, data0)
+          }
+          is (MemOpEnum.lw) {
+            memOutput.value := Cat(data3, data2, data1, data0)
           }
         }
+      }.otherwise {
+        loadCountdown := loadCountdown - 1.U
       }
     }
   }

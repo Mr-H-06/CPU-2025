@@ -32,9 +32,9 @@ class InstructionFetch(initialPC: Int = 0, queueDepth: Int = 4) extends Module {
     val out = Decoupled(new IFDecoded)
   })
 
-  // Debug cycle counter (local to IF)
-  val dbgCycle = RegInit(0.U(32.W))
-  dbgCycle := dbgCycle + 1.U
+  // 调试逻辑保留（默认注释，避免运行时开销）
+  // val dbgCycle = RegInit(0.U(32.W))
+  // dbgCycle := dbgCycle + 1.U
 
   val pcReg = RegInit(initialPC.U(32.W))
   val reqPcReg = RegInit(initialPC.U(32.W))
@@ -72,10 +72,10 @@ class InstructionFetch(initialPC: Int = 0, queueDepth: Int = 4) extends Module {
     outstanding := true.B
   }
 
-  val ifDbg = false.B
-  when(ifDbg && io.resetValid) {
-    printf("[IF] cycle=%d resetValid pcReg=%x resetPC=%x clear=%d\n", dbgCycle, pcReg, io.resetPC, io.clear)
-  }
+  // val ifDbg = false.B
+  // when(ifDbg && io.resetValid) {
+  //   printf("[IF] cycle=%d resetValid pcReg=%x resetPC=%x clear=%d\\n", dbgCycle, pcReg, io.resetPC, io.clear)
+  // }
 
   def decodeImm(instr: UInt): UInt = {
     val opcode = instr(6, 0)
@@ -128,16 +128,15 @@ class InstructionFetch(initialPC: Int = 0, queueDepth: Int = 4) extends Module {
     outstanding := false.B
   }
 
-  when(ifDbg && dbgCycle < 48.U) {
-    printf("[IFDBG] cycle=%d pcReg=%x reqPc=%x resetValid=%d resetPC=%x clear=%d outstanding=%d\n",
-      dbgCycle, pcReg, reqPcReg, io.resetValid, resetTarget, io.clear, outstanding)
-  }
+  // when(ifDbg && dbgCycle < 48.U) {
+  //   printf("[IFDBG] cycle=%d pcReg=%x reqPc=%x resetValid=%d resetPC=%x clear=%d outstanding=%d\\n",
+  //     dbgCycle, pcReg, reqPcReg, io.resetValid, resetTarget, io.clear, outstanding)
+  // }
+  // when(ifDbg && dbgCycle >= 40.U && dbgCycle < 120.U) {
+  //   printf("[IFDBG2] cycle=%d pcReg=%x reqPc=%x outstanding=%d clear=%d resetValid=%d epoch=%d outEpoch=%d mem_req=%d mem_rdy=%d mem_rsp=%d q_enq_v=%d q_enq_r=%d q_deq_v=%d q_deq_r=%d\\n",
+  //     dbgCycle, pcReg, reqPcReg, outstanding, io.clear, io.resetValid, epoch, outstandingEpoch,
+  //     io.mem_iread_valid, io.mem_iout_ready, io.mem_iout_valid,
+  //     q.io.enq.valid, q.io.enq.ready, q.io.deq.valid, q.io.deq.ready)
+  // }
 
-  // Targeted debug around the redirect window to check fetch state and queue handshakes
-  when(ifDbg && dbgCycle >= 40.U && dbgCycle < 120.U) {
-    printf("[IFDBG2] cycle=%d pcReg=%x reqPc=%x outstanding=%d clear=%d resetValid=%d epoch=%d outEpoch=%d mem_req=%d mem_rdy=%d mem_rsp=%d q_enq_v=%d q_enq_r=%d q_deq_v=%d q_deq_r=%d\n",
-      dbgCycle, pcReg, reqPcReg, outstanding, io.clear, io.resetValid, epoch, outstandingEpoch,
-      io.mem_iread_valid, io.mem_iout_ready, io.mem_iout_valid,
-      q.io.enq.valid, q.io.enq.ready, q.io.deq.valid, q.io.deq.ready)
-  }
 }

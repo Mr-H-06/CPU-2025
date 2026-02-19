@@ -17,10 +17,10 @@ class ROBValue extends Bundle {
 
 class ReorderBuffer(entries: Int = 32) extends Module {
 	private val idxWidth = log2Ceil(entries)
-	// Debug cycle counter
-	private val dbgCycle = RegInit(0.U(32.W))
-	dbgCycle := dbgCycle + 1.U
-	private val enableRobDebug = dbgCycle < 180.U
+	// 调试逻辑保留（默认注释，避免运行时开销）
+	// private val dbgCycle = RegInit(0.U(32.W))
+	// dbgCycle := dbgCycle + 1.U
+	// private val enableRobDebug = dbgCycle < 180.U
 
 	class Entry extends Bundle {
 		val valid = Bool()
@@ -129,10 +129,10 @@ class ReorderBuffer(entries: Int = 32) extends Module {
 	}
 
 	// issue phase
-	when(io.issue_valid && io.ready) {
+	val issueFire = io.issue_valid && io.ready
+	when(issueFire) {
 		entriesReg(tail).valid := true.B
-		// Control ops like JALR must wait for the ALU to produce the target, so only mark non-JALR immediates ready here
-		entriesReg(tail).ready := io.issue_has_value && (io.issue_bits.op =/= "b1100111".U || io.issue_bits.pc_reset =/= 0.U)
+		entriesReg(tail).ready := io.issue_has_value
 		entriesReg(tail).op := io.issue_bits.op
 		entriesReg(tail).rd := io.issue_bits.rd
 		entriesReg(tail).pc := io.issue_bits.pc
@@ -140,11 +140,9 @@ class ReorderBuffer(entries: Int = 32) extends Module {
 		entriesReg(tail).prediction := io.issue_bits.prediction
 		pcResetTable(tail) := io.issue_bits.pc_reset
 		tail := tail + 1.U
-		count := count + 1.U
 
-		// Focused debug around the __umodsi3 window to ensure t0 (x5) is captured correctly
-		when(enableRobDebug && io.issue_bits.pc >= "h00001130".U && io.issue_bits.pc <= "h00001170".U) {
-		}
+		// when(enableRobDebug && io.issue_bits.pc >= "h00001130".U && io.issue_bits.pc <= "h00001170".U) {
+		// }
 
 		when(io.issue_bits.op === "b1100011".U || io.issue_bits.op === "b1100111".U) {
 			pcResetReg := io.issue_bits.pc_reset & (~3.U(32.W))
@@ -170,20 +168,17 @@ class ReorderBuffer(entries: Int = 32) extends Module {
 	val isBranch = headEntry.op === "b1100011".U
 	val isJalr = headEntry.op === "b1100111".U
 	val isJal = headEntry.op === "b1101111".U
+	val isUncondCtrl = isJalr || isJal
 	val isCtrl = isBranch || isJalr || isJal
 	val isStore = headEntry.op === "b0100011".U
 	val headReady = headEntry.valid && headEntry.ready
-	when(enableRobDebug && headReady && count === 0.U) {
-	}
-
-	when(enableRobDebug && headReady) {
-	}
-
-
-	// Targeted debug around the array_test2 hang window
-	val robDbg = enableRobDebug && dbgCycle >= 60.U && dbgCycle < 150.U
-	when(robDbg) {
-	}
+	// when(enableRobDebug && headReady && count === 0.U) {
+	// }
+	// when(enableRobDebug && headReady) {
+	// }
+	// val robDbg = enableRobDebug && dbgCycle >= 60.U && dbgCycle < 150.U
+	// when(robDbg) {
+	// }
 
 	// defaults for pulse outputs
 	writebackValidReg := false.B
@@ -192,6 +187,8 @@ class ReorderBuffer(entries: Int = 32) extends Module {
 	commitValidReg := false.B
 	commitIsStoreReg := false.B
 	commitTagReg := 0.U
+	val commitPop = WireDefault(false.B)
+	val clearThisCycle = WireDefault(false.B)
 
 	when(headReady && isCtrl) {
 		pcResetReg := pcResetTable(head) & (~3.U(32.W))
@@ -207,25 +204,10 @@ class ReorderBuffer(entries: Int = 32) extends Module {
 		commitTagReg := head
 
 		val branchMispredict = isBranch && (headEntry.value =/= headEntry.prediction)
-		val jumpRedirect = !branchMispredict && (isJal || isJalr)
+		val forceRedirectFlush = branchMispredict || isUncondCtrl
 
-		when(branchMispredict) {
-			clearReg := true.B
-			when(headEntry.rd =/= 0.U && !isStore) {
-				writebackValidReg := true.B
-				writebackIndexReg := headEntry.rd
-				writebackTagReg := head
-				writebackValueReg := headEntry.value
-			}
-			for (i <- 0 until entries) {
-				entriesReg(i).valid := false.B
-				entriesReg(i).ready := false.B
-			}
-			head := 0.U
-			tail := 0.U
-			count := 0.U
-		}.elsewhen(jumpRedirect) {
-			// Redirect to jump target; retire the head and flush everything else (treat like a control mispredict)
+		when(forceRedirectFlush) {
+			clearThisCycle := true.B
 			clearReg := true.B
 			when(headEntry.rd =/= 0.U && !isStore) {
 				writebackValidReg := true.B
@@ -252,8 +234,17 @@ class ReorderBuffer(entries: Int = 32) extends Module {
 			}
 			entriesReg(head).valid := false.B
 			entriesReg(head).ready := false.B
-			count := Mux(count === 0.U, 0.U, count - 1.U)
+			commitPop := true.B
 			head := head + 1.U
+		}
+	}
+
+	// Keep occupancy accurate when issue and commit happen in the same cycle.
+	when(!clearThisCycle) {
+		when(issueFire && !commitPop) {
+			count := count + 1.U
+		}.elsewhen(!issueFire && commitPop) {
+			count := Mux(count === 0.U, 0.U, count - 1.U)
 		}
 	}
 }

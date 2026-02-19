@@ -19,7 +19,8 @@ class ReservationStationLSBTest extends AnyFlatSpec with ChiselScalatestTester {
     c.io.cdb.bits.index.poke(0.U)
     c.io.cdb.bits.value.poke(0.U)
     c.io.mem_ready.poke(true.B)
-    c.io.commit_store.poke(false.B)
+    c.io.commit_store_valid.poke(false.B)
+    c.io.commit_store_tag.poke(0.U)
   }
 
   "ReservationStationLSB" should "issue and execute a load with ready operands" in {
@@ -119,7 +120,8 @@ class ReservationStationLSBTest extends AnyFlatSpec with ChiselScalatestTester {
       c.io.issue_bits.op3_value.poke(8.U) // offset
       c.io.issue_bits.dest_tag.poke(1.U)
       c.io.cdb.valid.poke(false.B)
-      c.io.commit_store.poke(true.B)
+      c.io.commit_store_valid.poke(true.B)
+      c.io.commit_store_tag.poke(1.U)
 
       c.clock.step(1)
 
@@ -228,7 +230,8 @@ class ReservationStationLSBTest extends AnyFlatSpec with ChiselScalatestTester {
       c.io.issue_bits.op2_index.poke(2.U)
       c.io.issue_bits.op3_value.poke(4.U)
       c.io.issue_bits.dest_tag.poke(1.U)
-      c.io.commit_store.poke(false.B)
+      c.io.commit_store_valid.poke(false.B)
+      c.io.commit_store_tag.poke(0.U)
 
       c.clock.step(1)
 
@@ -238,7 +241,8 @@ class ReservationStationLSBTest extends AnyFlatSpec with ChiselScalatestTester {
       // mem_ready 拉高后当前拍应即可拉高 exec_valid（无需再等一个周期）
       c.io.mem_ready.poke(true.B)
       c.io.issue_valid.poke(false.B)
-      c.io.commit_store.poke(true.B)
+      c.io.commit_store_valid.poke(true.B)
+      c.io.commit_store_tag.poke(1.U)
 
       c.io.exec_valid.expect(true.B)
       c.io.exec_bits.op.expect(MemOpEnum.sw)

@@ -1,9 +1,29 @@
 .bsp
+.bloop/
+.metals/
+.scala-build/
+.idea/
+.vscode/
 target
 project
 test_run_dir
+project/**/target/
 
 *.txt
 *.py
+*.log
+*.*.log
 
-RISC-V Simulator
+RISC-V Simulator/
+test-classes
+
+# generated test artifacts
+src/test/resources/*.converted
+src/test/resources/*.dump
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+read.md
+tmp*

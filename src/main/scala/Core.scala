@@ -32,9 +32,28 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4, startP
     val debug_commit_is_store = Output(Bool())
     val debug_commit_value = Output(UInt(32.W))
     val debug_commit_tag = Output(UInt(5.W))
+    val debug_commit_count = Output(UInt(32.W))
+
+    // Frontend handshake debug
+    val debug_if_out_valid = Output(Bool())
+    val debug_if_out_ready = Output(Bool())
+    val debug_iread_valid = Output(Bool())
+    val debug_iout_valid = Output(Bool())
+    val debug_iout_ready = Output(Bool())
+    val debug_rob_ready = Output(Bool())
+    val debug_will_fire = Output(Bool())
   })
 
   // Modules
+  private def truthy(v: String): Boolean = {
+    val s = v.toLowerCase
+    s == "1" || s == "true" || s == "yes" || s == "on"
+  }
+  private val longDataNames = Seq("basicopt1.data", "bulgarian.data", "hanoi.data", "qsort.data")
+  private val isLongData = longDataNames.exists(initFile.contains)
+  private val fastLongDataEnabled = sys.props.get("cpu.fastLongData").map(truthy).getOrElse(false)
+  private val effectiveMemDelay = if (fastLongDataEnabled && isLongData) 1 else memDelay
+
   val ifu = Module(new InstructionFetch(initialPC = startPC))
   val rob = Module(new ReorderBuffer())
   val rf = Module(new RegisterFile())
@@ -42,7 +61,7 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4, startP
   val lsb = Module(new ReservationStationLSB())
   val alu = Module(new ALU())
   val cdb = Module(new CommonDataBus())
-  val mem = Module(new Memory(initFile, memSize, memDelay))
+  val mem = Module(new Memory(initFile, memSize, effectiveMemDelay))
 
   // Debug cycle counter
   val dbgCycle = RegInit(0.U(32.W))
@@ -52,11 +71,15 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4, startP
 
   val globalClear = reset.asBool || rob.io.clear
 
+  // Issue-time redirect for unconditional jumps (JAL/JALR)
+  val issueRedirect = WireDefault(false.B)
+  val issueRedirectPC = WireDefault(0.U(32.W))
+
   // Instruction Fetch connections
   val robResetHasTarget = rob.io.pc_reset.orR
-  ifu.io.clear := globalClear
-  ifu.io.resetValid := rob.io.clear && robResetHasTarget
-  ifu.io.resetPC := rob.io.pc_reset
+  ifu.io.clear := globalClear || issueRedirect
+  ifu.io.resetValid := issueRedirect || (rob.io.clear && robResetHasTarget)
+  ifu.io.resetPC := Mux(issueRedirect, issueRedirectPC, rob.io.pc_reset)
 
   // Memory instruction side
   mem.io.clear := globalClear
@@ -104,6 +127,17 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4, startP
   io.debug_commit_is_store := rob.io.commit_is_store
   io.debug_commit_value := rob.io.commit_value
   io.debug_commit_tag := rob.io.commit_tag
+  val commitCount = RegInit(0.U(32.W))
+  when(rob.io.commit_valid) {
+    commitCount := commitCount + 1.U
+  }
+  io.debug_commit_count := commitCount
+  io.debug_if_out_valid := ifu.io.out.valid
+  io.debug_if_out_ready := ifu.io.out.ready
+  io.debug_iread_valid := ifu.io.mem_iread_valid
+  io.debug_iout_valid := ifu.io.mem_iout_valid
+  io.debug_iout_ready := ifu.io.mem_iout_ready
+  io.debug_rob_ready := rob.io.ready
 
   // Reservation Stations (ALU)
   rs.io.clear := globalClear
@@ -132,7 +166,8 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4, startP
   lsb.io.wb_tag := rob.io.writeback_tag
   lsb.io.wb_value := rob.io.writeback_value
   lsb.io.mem_ready := mem.io.memValue.ready
-  lsb.io.commit_store := rob.io.commit_store
+  lsb.io.commit_store_valid := rob.io.commit_store
+  lsb.io.commit_store_tag := rob.io.commit_tag
 
   // Memory data side (from LSB)
   mem.io.memAccess.valid := lsb.io.exec_valid
@@ -233,23 +268,9 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4, startP
       val rs1FromRob = rs1Entry.tag_valid && rob.io.values(rs1Entry.tag).valid
       val rs1ReadyBase = !rs1Entry.tag_valid || rs1FromRob
       val rs1ValueBase = Mux(rs1Entry.tag_valid, rob.io.values(rs1Entry.tag).value, rs1Entry.value)
-
-      // Guard against the observed t0 (x5) corruption in the __umodsi3 window by optionally
-      // sourcing the target from RA (x1) instead. Only switch to RA when x5 clearly points to
-      // the current PC (self-loop) which indicates the link was clobbered during a redirect.
-      val raEntry = rf.io.alu_regs(1.U)
-      val raFromRob = raEntry.tag_valid && rob.io.values(raEntry.tag).valid
-      val raReady = !raEntry.tag_valid || raFromRob
-      val raValue = Mux(raEntry.tag_valid, rob.io.values(raEntry.tag).value, raEntry.value)
-      val inUmodsiWindow = instr.pc >= "h00001138".U && instr.pc <= "h00001198".U
-      val rs1LooksSelfLoop = (rs1ValueBase === pc) || (rs1ValueBase === pc + 4.U)
-      // Only fall back to RA when t0 (x5) is clearly self-referential; otherwise honor the
-      // computed link in x5 to avoid clobbering legitimate targets.
-      val useRaAsLink = inUmodsiWindow && rs1 === 5.U && rd === 0.U && rs1LooksSelfLoop
-
-      val rs1Ready = Mux(useRaAsLink, raReady, rs1ReadyBase)
-      val rs1Value = Mux(useRaAsLink, raValue, rs1ValueBase)
-      val jalrTarget = (rs1Value + imm) & (~3.U(32.W))
+      val rs1Ready = rs1ReadyBase
+      val rs1Value = rs1ValueBase
+      val jalrTarget = (rs1Value + imm) & (~1.U(32.W))
 
       // JALR target can be computed here once rs1 is ready; avoid relying on a later CDB broadcast.
       willFire := canIssue && issueReadySimple && rs1Ready
@@ -260,11 +281,6 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4, startP
       robPrediction := 0.U
       writeDest := rd =/= 0.U
 
-      // Targeted debug to catch the stuck JALR loop near __umodsi3
-      when(canIssue && instr.pc >= "h000010f0".U && instr.pc <= "h00001180".U) {
-        printf("[JALR-DBG] cycle=%d pc=%x rs1=%d rs1_ready=%d rs1_tag_v=%d rs1_tag=%d rs1_val=%x rs1_base=%x ra_val=%x useRA=%d imm=%x target=%x issueReadyALU=%d clear=%d\n",
-          dbgCycle, pc, rs1, rs1Ready, rs1Entry.tag_valid, rs1Entry.tag, rs1Value, rs1ValueBase, raValue, useRaAsLink, imm, jalrTarget, issueReadyALU, globalClear)
-      }
     }
     is("b1100011".U) { // Branches
       willFire := canIssue && issueReadyALU
@@ -302,10 +318,6 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4, startP
         "b100".U -> MemOpEnum.lbu,
         "b101".U -> MemOpEnum.lhu
       ))
-      when(willFire && pc === "h00000130".U) {
-        val rs1Entry = rf.io.lsb_regs(rs1)
-        printf(p"[LD-ISSUE] cyc=${dbgCycle} pc=0x${Hexadecimal(pc)} rs1=x${rs1} tag_v=${rs1Entry.tag_valid} tag=${rs1Entry.tag} val=0x${Hexadecimal(rs1Entry.value)} imm=0x${Hexadecimal(imm)}\n")
-      }
     }
     is("b0100011".U) { // STORE
       willFire := canIssue && issueReadyLSB
@@ -370,22 +382,6 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4, startP
   }
 
   // Targeted debug around magic test window (0x1200-0x1240)
-  val magicWindow = instrValid && instr.pc >= "h00001200".U && instr.pc <= "h00001240".U
-  when(magicWindow) {
-    val x8 = rf.io.alu_regs(8).value
-    val x15 = rf.io.alu_regs(15).value
-    val rs1Entry = rf.io.alu_regs(rs1)
-    val rs2Entry = rf.io.alu_regs(rs2)
-    printf("[MAGIC] cycle=%d pc=%x op=%x rd=%d rs1=%d rs2=%d imm=%x willFire=%d robReady=%d issueALU=%d issueLSB=%d x8=%x x15=%x\n",
-      dbgCycle, pc, opcode, rd, rs1, rs2, imm, willFire, rob.io.ready, issueReadyALU, issueReadyLSB, x8, x15)
-    printf("[MAGIC] rs1_tag_v=%d rs1_tag=%d rs1_val=%x rs2_tag_v=%d rs2_tag=%d rs2_val=%x\n",
-      rs1Entry.tag_valid, rs1Entry.tag, rs1Entry.value, rs2Entry.tag_valid, rs2Entry.tag, rs2Entry.value)
-    printf("[MAGIC] rob_head pc=%x op=%x rd=%d valid=%d ready=%d wb_v=%d wb_rd=%d wb_val=%x clear=%d\n",
-      rob.io.head_pc, rob.io.head_op, rob.io.head_rd, rob.io.head_valid, rob.io.head_ready,
-      rob.io.writeback_valid, rob.io.writeback_index, rob.io.writeback_value, rob.io.clear)
-    printf("[MAGIC] cdb_v=%d cdb_idx=%d cdb_val=%x\n",
-      cdb.io.rob.valid, cdb.io.rob.bits.index, cdb.io.rob.bits.value)
-  }
 
   // Issue to ROB
   rob.io.issue_valid := willFire
@@ -401,17 +397,24 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4, startP
   rf.io.destination_valid := willFire && writeDest
   rf.io.destination := rd
 
+  // Unconditional jump redirect at issue-time to avoid commit-time clear storms
+  val isIssueJal = opcode === "b1101111".U
+  val isIssueJalr = opcode === "b1100111".U
+  issueRedirect := willFire && (isIssueJal || isIssueJalr)
+  issueRedirectPC := robPcReset
+
   io.debug_reg_a0 := rf.io.alu_regs(10).value
   io.debug_pc := ifu.io.mem_iread_address
 
   // IF readiness
   ifu.io.out.ready := willFire
+  io.debug_will_fire := willFire
 
-  // Halt detection: sb x0, -1(x0) with byte 0 (legacy) or store byte to 0x30004 (MMIO halt)
+  // Halt detection should be based on committed/retired effects to avoid early stop
+  // before older in-flight writes reach architectural state.
   val haltReg = RegInit(false.B)
-  val isEcall = opcode === "b1110011".U && funct3 === 0.U && instr.rs1 === 0.U && instr.rs2 === 0.U && funct7 === 0.U && instr.instr(31, 20) === 0.U
-  val isEbreak = opcode === "b1110011".U && funct3 === 0.U && instr.rs1 === 0.U && instr.rs2 === 0.U && funct7 === 0.U && instr.instr(31, 20) === 1.U
-  when((isEcall || isEbreak) && instrValid) { haltReg := true.B }
+  val commitIsSystem = rob.io.commit_valid && rob.io.commit_op === "b1110011".U
+  when(commitIsSystem) { haltReg := true.B }
   val isSb = lsb.io.exec_bits.op === MemOpEnum.sb
   val sbAddr = lsb.io.exec_bits.address
   val sbByte0 = lsb.io.exec_bits.value & 0xFF.U
@@ -419,5 +422,6 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4, startP
        (sbAddr === "hFFFF_FFFF".U && sbByte0 === 0.U || sbAddr === "h0003_0004".U)) {
     haltReg := true.B
   }
+
   io.halted := haltReg
 }

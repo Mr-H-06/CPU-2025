@@ -13,15 +13,16 @@ class TestHex extends AnyFlatSpec with ChiselScalatestTester {
       s == "1" || s == "true" || s == "yes" || s == "on"
     }
 
-    val initFile = sys.props.getOrElse("cpu.initFile", "src/test/resources/magic.data")
+    val initFile = sys.props.getOrElse("cpu.initFile", "src/test/resources/bulgarian.data")
     val maxCycles = intProp("cpu.maxCycles", 2000000)
-    val stepChunk = math.max(1, intProp("cpu.stepChunk", 1024))
+    val stepChunk = math.max(1, intProp("cpu.stepChunk", 262144))
     val debugMode = sys.props.get("cpu.debugMode").map(truthy).getOrElse(false)
     val fastStep = sys.props.get("cpu.fastStep").map(truthy).getOrElse(true)
     val noPeekRun = sys.props.get("cpu.noPeekRun").map(truthy).getOrElse(false)
     val pureRun = sys.props.get("cpu.pureRun").map(truthy).getOrElse(true)
     val pureCheckChunk = math.max(1, intProp("cpu.pureCheckChunk", stepChunk))
-    val progressEvery = math.max(1, intProp("cpu.progressEvery", 100000))
+    val printA0Tag = sys.props.get("cpu.printA0Tag").map(truthy).getOrElse(false)
+    val progressEvery = math.max(1, intProp("cpu.progressEvery", 250000))
     val requireHalt = sys.props.get("cpu.requireHalt").map(truthy).getOrElse(false)
     val expectExitCode = longPropOpt("cpu.expectExitCode")
 
@@ -85,10 +86,16 @@ class TestHex extends AnyFlatSpec with ChiselScalatestTester {
       }
 
       val finalA0 = c.io.debug_reg_a0.peek().litValue.toLong & 0xffffffffL
+      val finalA0Tag = if (printA0Tag) c.io.debug_reg_a0_tag.peek().litValue.toLong else -1L
+      val finalA0TagValid = if (printA0Tag) c.io.debug_reg_a0_tag_valid.peek().litToBoolean else false
       val exitCode = finalA0 & 0xffL
       if (pureRun) {
         // 纯净模式：只关注输入->输出结果，不输出中间调试状态
-        println(f"PURE_RESULT file=$initFile halted=$halted cycles=$cycles%d a0=0x$finalA0%08x exit_code=$exitCode%d")
+        if (printA0Tag) {
+          println(f"PURE_RESULT file=$initFile halted=$halted cycles=$cycles%d a0=0x$finalA0%08x a0_tag=$finalA0Tag%d a0_tag_valid=$finalA0TagValid%s exit_code=$exitCode%d")
+        } else {
+          println(f"PURE_RESULT file=$initFile halted=$halted cycles=$cycles%d a0=0x$finalA0%08x exit_code=$exitCode%d")
+        }
       } else {
         val finalPc = c.io.debug_pc.peek().litValue.toLong
         val headPc = c.io.debug_rob_head_pc.peek().litValue.toLong
@@ -107,7 +114,11 @@ class TestHex extends AnyFlatSpec with ChiselScalatestTester {
         val willFireFinal = c.io.debug_will_fire.peek().litToBoolean
 
         // 单行最终结果接口；debugMode=true 时会额外输出中间 [DBG] 行
-        println(f"RESULT mode=${if (debugMode) "debug" else "result"} fastStep=$fastStep file=$initFile halted=$halted cycles=$cycles%d commits=$commitCountFinal%d final_pc=0x$finalPc%08x head_pc=0x$headPc%08x head_op=0x$headOp%02x head_rd=$headRd%d head_valid=$headValid%s head_ready=$headReady%s mem_ready=$memReady%s if_out_valid=$ifOutValid%s if_out_ready=$ifOutReady%s iread_valid=$ireadValid%s iout_valid=$ioutValid%s iout_ready=$ioutReady%s rob_ready=$robReady%s will_fire=$willFireFinal%s pre_halt_a0=0x$preHaltA0%08x a0=0x$finalA0%08x exit_code=$exitCode%d")
+        if (printA0Tag) {
+          println(f"RESULT mode=${if (debugMode) "debug" else "result"} fastStep=$fastStep file=$initFile halted=$halted cycles=$cycles%d commits=$commitCountFinal%d final_pc=0x$finalPc%08x head_pc=0x$headPc%08x head_op=0x$headOp%02x head_rd=$headRd%d head_valid=$headValid%s head_ready=$headReady%s mem_ready=$memReady%s if_out_valid=$ifOutValid%s if_out_ready=$ifOutReady%s iread_valid=$ireadValid%s iout_valid=$ioutValid%s iout_ready=$ioutReady%s rob_ready=$robReady%s will_fire=$willFireFinal%s pre_halt_a0=0x$preHaltA0%08x a0=0x$finalA0%08x a0_tag=$finalA0Tag%d a0_tag_valid=$finalA0TagValid%s exit_code=$exitCode%d")
+        } else {
+          println(f"RESULT mode=${if (debugMode) "debug" else "result"} fastStep=$fastStep file=$initFile halted=$halted cycles=$cycles%d commits=$commitCountFinal%d final_pc=0x$finalPc%08x head_pc=0x$headPc%08x head_op=0x$headOp%02x head_rd=$headRd%d head_valid=$headValid%s head_ready=$headReady%s mem_ready=$memReady%s if_out_valid=$ifOutValid%s if_out_ready=$ifOutReady%s iread_valid=$ireadValid%s iout_valid=$ioutValid%s iout_ready=$ioutReady%s rob_ready=$robReady%s will_fire=$willFireFinal%s pre_halt_a0=0x$preHaltA0%08x a0=0x$finalA0%08x exit_code=$exitCode%d")
+        }
       }
 
       if (requireHalt) {

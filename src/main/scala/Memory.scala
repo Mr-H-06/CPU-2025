@@ -2,6 +2,9 @@ import chisel3._
 import chisel3.util._
 import chisel3.experimental._
 import chisel3.util.experimental.loadMemoryFromFile
+import chisel3.util.experimental.loadMemoryFromFileInline
+import java.io.File
+import java.nio.file.Paths
 import utils._
 
 class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
@@ -68,12 +71,22 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
     }
   }
   
-  // Generate temporary file name
-  private val tempFile = s"${initFile}.converted"
-  
+  private val initFileAbsOpt =
+    if (initFile.nonEmpty) Some(Paths.get(initFile).toAbsolutePath.normalize.toString) else None
+  // Keep a relative path for simulator annotations (Treadle expects relative),
+  // but use absolute path for actual file I/O during conversion.
+  private val tempFileRelOpt = if (initFile.nonEmpty) Some(s"${initFile}.converted") else None
+  private val tempFileAbsOpt = initFileAbsOpt.map(p => s"${p}.converted")
+
   // Convert Intel HEX to simple format if needed
-  if (initFile.nonEmpty) {
-    convertIntelHexToSimpleHex(initFile, tempFile)
+  initFileAbsOpt.zip(tempFileAbsOpt).headOption.foreach { case (in, out) =>
+    convertIntelHexToSimpleHex(in, out)
+  }
+  if (sys.props.get("cpu.memInitVerbose").exists(_.toLowerCase == "true")) {
+    initFileAbsOpt.zip(tempFileAbsOpt).headOption.foreach { case (in, out) =>
+      val f = new File(out)
+      println(s"[MEMINIT] in=$in out=$out exists=${f.exists()} size=${if (f.exists()) f.length() else -1L}")
+    }
   }
   
   val io = IO(new Bundle {
@@ -95,20 +108,26 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
     val commit = Input(Bool())
   })
 
-  val mem = SyncReadMem(memSize, UInt(8.W))
+  // Use `Mem` (asynchronous read) to keep simulation behavior consistent
+  // across backends (Treadle/Verilator) for this cycle-level model.
+  val mem = Mem(memSize, UInt(8.W))
   
-  if (initFile.nonEmpty) {
-    loadMemoryFromFile(mem, tempFile)
-  }
+  tempFileRelOpt.foreach(f => loadMemoryFromFileInline(mem, f))
 
   val addrWidth = log2Ceil(memSize)
   def maskAddr(addr: UInt): UInt = addr(addrWidth - 1, 0)
+  def isMmioAddr(addr: UInt): Bool = {
+    addr === "h00030004".U || addr === "hffffffff".U
+  }
 
-  val iaddr = maskAddr(Mux(io.iread.valid, io.iread.address, 0.U))
-  val instruction0 = RegNext(mem.read(iaddr + 0.U), 0.U)
-  val instruction1 = RegNext(mem.read(iaddr + 1.U), 0.U)
-  val instruction2 = RegNext(mem.read(iaddr + 2.U), 0.U)
-  val instruction3 = RegNext(mem.read(iaddr + 3.U), 0.U)
+  val iReqAddrReg = RegInit(0.U(addrWidth.W))
+  when(io.iread.valid) {
+    iReqAddrReg := maskAddr(io.iread.address)
+  }
+  val instruction0 = mem.read(iReqAddrReg + 0.U)
+  val instruction1 = mem.read(iReqAddrReg + 1.U)
+  val instruction2 = mem.read(iReqAddrReg + 2.U)
+  val instruction3 = mem.read(iReqAddrReg + 3.U)
   
   val iReadyReg = RegInit(true.B)
   val iValidReg = RegInit(false.B)
@@ -127,15 +146,16 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
   }
   
   val memInput = RegInit(0.U.asTypeOf(new Valid(new MemInput)))
+  val memInputIsMmio = RegInit(false.B)
   val storePending = RegInit(0.U.asTypeOf(new Valid(new MemInput)))
   val memOutput = RegInit(0.U.asTypeOf(new CDBData))
   val loadCountdownWidth = log2Ceil(math.max(delay + 1, 2))
   val loadCountdown = RegInit(0.U(loadCountdownWidth.W))
   val dataAddr = maskAddr(memInput.bits.address)
-  val data0 = RegNext(mem.read(dataAddr + 0.U), 0.U)
-  val data1 = RegNext(mem.read(dataAddr + 1.U), 0.U)
-  val data2 = RegNext(mem.read(dataAddr + 2.U), 0.U)
-  val data3 = RegNext(mem.read(dataAddr + 3.U), 0.U)
+  val data0 = mem.read(dataAddr + 0.U)
+  val data1 = mem.read(dataAddr + 1.U)
+  val data2 = mem.read(dataAddr + 2.U)
+  val data3 = mem.read(dataAddr + 3.U)
 
   val mValidReg = RegInit(false.B)
   mValidReg := false.B
@@ -146,6 +166,7 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
 
   when (io.clear) {
     memInput := 0.U.asTypeOf(new Valid(new MemInput))
+    memInputIsMmio := false.B
     storePending := 0.U.asTypeOf(new Valid(new MemInput))
     loadCountdown := 0.U
   }.otherwise {
@@ -161,27 +182,28 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
       when(!storePending.valid) {
         storePending.valid := true.B
         storePending.bits := io.memAccess.bits
-        storePending.bits.address := maskAddr(io.memAccess.bits.address)
       }
     }
 
     // Drain pending store when memory is free
     when(storePending.valid && !memInput.valid) {
-      val addr = storePending.bits.address
-      val addrMasked = maskAddr(addr)
-      switch (storePending.bits.op) {
-        is (MemOpEnum.sb) {
-          mem.write(addrMasked, storePending.bits.value(7, 0))
-        }
-        is (MemOpEnum.sh) {
-          mem.write(addrMasked, storePending.bits.value(7, 0))
-          mem.write(addrMasked + 1.U, storePending.bits.value(15, 8))
-        }
-        is (MemOpEnum.sw) {
-          mem.write(addrMasked, storePending.bits.value(7, 0))
-          mem.write(addrMasked + 1.U, storePending.bits.value(15, 8))
-          mem.write(addrMasked + 2.U, storePending.bits.value(23, 16))
-          mem.write(addrMasked + 3.U, storePending.bits.value(31, 24))
+      val addrRaw = storePending.bits.address
+      val addrMasked = maskAddr(addrRaw)
+      when(!isMmioAddr(addrRaw)) {
+        switch (storePending.bits.op) {
+          is (MemOpEnum.sb) {
+            mem.write(addrMasked, storePending.bits.value(7, 0))
+          }
+          is (MemOpEnum.sh) {
+            mem.write(addrMasked, storePending.bits.value(7, 0))
+            mem.write(addrMasked + 1.U, storePending.bits.value(15, 8))
+          }
+          is (MemOpEnum.sw) {
+            mem.write(addrMasked, storePending.bits.value(7, 0))
+            mem.write(addrMasked + 1.U, storePending.bits.value(15, 8))
+            mem.write(addrMasked + 2.U, storePending.bits.value(23, 16))
+            mem.write(addrMasked + 3.U, storePending.bits.value(31, 24))
+          }
         }
       }
       storePending.valid := false.B
@@ -189,27 +211,30 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
 
     // Accept a new memory request when free (no load in flight, no pending store)
     when(io.memAccess.valid && !memInput.valid && !storePending.valid) {
-      val addr = io.memAccess.bits.address
-      val addrMasked = maskAddr(addr)
-      val isStackAddr = addr >= stackLo && addr < stackHi
+      val addrRaw = io.memAccess.bits.address
+      val addrMasked = maskAddr(addrRaw)
+      val isMmio = isMmioAddr(addrRaw)
       when(io.memAccess.bits.op.isOneOf(MemOpEnum.lb, MemOpEnum.lbu, MemOpEnum.lh, MemOpEnum.lhu, MemOpEnum.lw)) {
         memInput := io.memAccess
-        memInput.bits.address := addrMasked
+        memInput.bits.address := Mux(isMmio, 0.U, addrMasked)
+        memInputIsMmio := isMmio
         loadCountdown := (if (delay == 1) 1 else delay - 1).U
       }.otherwise {
-        switch (io.memAccess.bits.op) {
-          is (MemOpEnum.sb) {
-            mem.write(addrMasked, io.memAccess.bits.value(7, 0))
-          }
-          is (MemOpEnum.sh) {
-            mem.write(addrMasked, io.memAccess.bits.value(7, 0))
-            mem.write(addrMasked + 1.U, io.memAccess.bits.value(15, 8))
-          }
-          is (MemOpEnum.sw) {
-            mem.write(addrMasked, io.memAccess.bits.value(7, 0))
-            mem.write(addrMasked + 1.U, io.memAccess.bits.value(15, 8))
-            mem.write(addrMasked + 2.U, io.memAccess.bits.value(23, 16))
-            mem.write(addrMasked + 3.U, io.memAccess.bits.value(31, 24))
+        when(!isMmio) {
+          switch (io.memAccess.bits.op) {
+            is (MemOpEnum.sb) {
+              mem.write(addrMasked, io.memAccess.bits.value(7, 0))
+            }
+            is (MemOpEnum.sh) {
+              mem.write(addrMasked, io.memAccess.bits.value(7, 0))
+              mem.write(addrMasked + 1.U, io.memAccess.bits.value(15, 8))
+            }
+            is (MemOpEnum.sw) {
+              mem.write(addrMasked, io.memAccess.bits.value(7, 0))
+              mem.write(addrMasked + 1.U, io.memAccess.bits.value(15, 8))
+              mem.write(addrMasked + 2.U, io.memAccess.bits.value(23, 16))
+              mem.write(addrMasked + 3.U, io.memAccess.bits.value(31, 24))
+            }
           }
         }
       }
@@ -219,23 +244,28 @@ class Memory(initFile: String, memSize: Int, delay: Int) extends Module {
     when(memInput.valid) {
       when(loadCountdown === 1.U) {
         memInput.valid := false.B
+        memInputIsMmio := false.B
         mValidReg := true.B
         memOutput.index := memInput.bits.index
-        switch (memInput.bits.op) {
-          is (MemOpEnum.lb) {
-            memOutput.value := Cat(Fill(24, data0(7)), data0)
-          }
-          is (MemOpEnum.lbu) {
-            memOutput.value := Cat(Fill(24, 0.B), data0)
-          }
-          is (MemOpEnum.lh) {
-            memOutput.value := Cat(Fill(16, data1(7)), data1, data0)
-          }
-          is (MemOpEnum.lhu) {
-            memOutput.value := Cat(Fill(16, 0.B), data1, data0)
-          }
-          is (MemOpEnum.lw) {
-            memOutput.value := Cat(data3, data2, data1, data0)
+        when(memInputIsMmio) {
+          memOutput.value := 0.U
+        }.otherwise {
+          switch (memInput.bits.op) {
+            is (MemOpEnum.lb) {
+              memOutput.value := Cat(Fill(24, data0(7)), data0)
+            }
+            is (MemOpEnum.lbu) {
+              memOutput.value := Cat(Fill(24, 0.B), data0)
+            }
+            is (MemOpEnum.lh) {
+              memOutput.value := Cat(Fill(16, data1(7)), data1, data0)
+            }
+            is (MemOpEnum.lhu) {
+              memOutput.value := Cat(Fill(16, 0.B), data1, data0)
+            }
+            is (MemOpEnum.lw) {
+              memOutput.value := Cat(data3, data2, data1, data0)
+            }
           }
         }
       }.otherwise {

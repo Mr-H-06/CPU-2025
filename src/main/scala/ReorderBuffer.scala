@@ -204,7 +204,7 @@ class ReorderBuffer(entries: Int = 32) extends Module {
 		commitTagReg := head
 
 		val branchMispredict = isBranch && (headEntry.value =/= headEntry.prediction)
-		val forceRedirectFlush = branchMispredict || isUncondCtrl
+		val forceRedirectFlush = branchMispredict
 
 		when(forceRedirectFlush) {
 			clearThisCycle := true.B

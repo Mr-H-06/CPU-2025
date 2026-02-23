@@ -7,6 +7,8 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4, startP
     val halted = Output(Bool())
     val debug_cdb_rob = Output(Valid(new CDBData))
     val debug_reg_a0 = Output(UInt(32.W))
+    val debug_reg_a0_tag = Output(UInt(5.W))
+    val debug_reg_a0_tag_valid = Output(Bool())
     val debug_pc = Output(UInt(32.W))
     val debug_regs = Output(Vec(32, UInt(32.W)))
 
@@ -52,6 +54,10 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4, startP
   private val longDataNames = Seq("basicopt1.data", "bulgarian.data", "hanoi.data", "qsort.data")
   private val isLongData = longDataNames.exists(initFile.contains)
   private val fastLongDataEnabled = sys.props.get("cpu.fastLongData").map(truthy).getOrElse(false)
+  private val traceCommitEnabled = sys.props.get("cpu.traceCommit").map(truthy).getOrElse(false)
+  private val traceCommitRd = sys.props.get("cpu.traceCommitRd").flatMap(v => scala.util.Try(v.toInt).toOption).getOrElse(-1)
+  private val traceCommitCycleLo = sys.props.get("cpu.traceCommitCycleLo").flatMap(v => scala.util.Try(v.toLong).toOption).getOrElse(-1L)
+  private val traceCommitCycleHi = sys.props.get("cpu.traceCommitCycleHi").flatMap(v => scala.util.Try(v.toLong).toOption).getOrElse(-1L)
   private val effectiveMemDelay = if (fastLongDataEnabled && isLongData) 1 else memDelay
 
   val ifu = Module(new InstructionFetch(initialPC = startPC))
@@ -404,11 +410,25 @@ class Core(initFile: String = "", memSize: Int = 4096, memDelay: Int = 4, startP
   issueRedirectPC := robPcReset
 
   io.debug_reg_a0 := rf.io.alu_regs(10).value
+  io.debug_reg_a0_tag := rf.io.alu_regs(10).tag
+  io.debug_reg_a0_tag_valid := rf.io.alu_regs(10).tag_valid
   io.debug_pc := ifu.io.mem_iread_address
+
+  val traceCycleHit = (if (traceCommitCycleLo >= 0) dbgCycle >= traceCommitCycleLo.U else true.B) &&
+    (if (traceCommitCycleHi >= 0) dbgCycle <= traceCommitCycleHi.U else true.B)
+  when(traceCommitEnabled.B && traceCycleHit && rob.io.commit_valid &&
+       (if (traceCommitRd >= 0) rob.io.commit_rd === traceCommitRd.U else true.B)) {
+    printf("[CMT] cycle=%d pc=0x%x op=0x%x rd=%d val=0x%x a0=0x%x\n",
+      dbgCycle, rob.io.commit_pc, rob.io.commit_op, rob.io.commit_rd, rob.io.commit_value, rf.io.alu_regs(10).value)
+  }
 
   // IF readiness
   ifu.io.out.ready := willFire
   io.debug_will_fire := willFire
+
+  // Handshake with IF queue: consume exactly when current instruction is issued.
+  // Without this ready signal, frontend can be permanently back-pressured in some backends.
+  ifu.io.out.ready := willFire
 
   // Halt detection should be based on committed/retired effects to avoid early stop
   // before older in-flight writes reach architectural state.

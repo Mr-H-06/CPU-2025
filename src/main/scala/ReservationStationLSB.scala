@@ -252,37 +252,43 @@ class ReservationStationLSB(entries: Int = 4) extends Module {
     }
   }
 
-  // If clear preserved committed stores as sparse entries, advance deqPtr across holes.
-  when(!io.clear && count =/= 0.U && !mem(deqPtr).valid) {
-    deqPtr := deqPtr + 1.U
-  }
-
   // Reset
   when(io.clear) {
-    val keepCommitted = Wire(Vec(entries, Bool()))
-    for (i <- 0 until entries) {
-      keepCommitted(i) := mem(i).valid && isStoreFromOp(mem(i).op) && mem(i).store_committed
-    }
-
     val keepByOffset = Wire(Vec(entries, Bool()))
+    val keptEntryByOffset = Wire(Vec(entries, new ReservationStationEntryLSB()))
     for (off <- 0 until entries) {
       val idx = (deqPtr + off.U) % entries.U
-      keepByOffset(off) := keepCommitted(idx)
+      val keep = mem(idx).valid && isStoreFromOp(mem(idx).op) &&
+        (mem(idx).store_committed || (io.commit_store_valid && mem(idx).dest_tag === io.commit_store_tag))
+      keepByOffset(off) := keep
+      keptEntryByOffset(off) := mem(idx)
+      keptEntryByOffset(off).valid := keep
     }
 
-    val keptCount = PopCount(keepCommitted)
-    val hasKept = keepByOffset.asUInt.orR
-    val keptOffset = PriorityEncoder(keepByOffset.asUInt)
-
+    val compacted = Wire(Vec(entries, new ReservationStationEntryLSB()))
     for (i <- 0 until entries) {
-      when(!keepCommitted(i)) {
-        mem(i) := 0.U.asTypeOf(new ReservationStationEntryLSB())
-        mem(i).valid := false.B
+      compacted(i) := 0.U.asTypeOf(new ReservationStationEntryLSB())
+      compacted(i).valid := false.B
+    }
+
+    for (off <- 0 until entries) {
+      val writePos = PopCount(keepByOffset.take(off))
+      when(keepByOffset(off)) {
+        compacted(writePos) := keptEntryByOffset(off)
+        compacted(writePos).valid := true.B
       }
     }
 
+    for (i <- 0 until entries) {
+      mem(i) := compacted(i)
+    }
+
+    val keptCount = PopCount(keepByOffset)
+    val keptTail = Wire(UInt(log2Ceil(entries).W))
+    keptTail := (keptCount % entries.U)(log2Ceil(entries) - 1, 0)
     enqPtr := 0.U
-    deqPtr := Mux(hasKept, (deqPtr + keptOffset) % entries.U, 0.U)
+    deqPtr := 0.U
+    enqPtr := keptTail
     count := keptCount
   }
 }

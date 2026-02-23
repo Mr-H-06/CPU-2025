@@ -61,7 +61,7 @@ class InstructionFetch(initialPC: Int = 0, queueDepth: Int = 4) extends Module {
   q.io.deq <> io.out
 
   // Block new fetch requests while a pipeline clear/reset is in flight
-  val canRequest = q.io.enq.ready && io.mem_iout_ready && !io.clear && !io.resetValid
+  val canRequest = q.io.enq.ready && io.mem_iout_ready && !io.clear && !io.resetValid && !outstanding
   issuing := canRequest
   io.mem_iread_address := pcReg
   io.mem_iread_valid := canRequest

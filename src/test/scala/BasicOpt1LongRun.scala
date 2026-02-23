@@ -15,8 +15,9 @@ class BasicOpt1LongRun extends AnyFlatSpec with ChiselScalatestTester {
     }
     test(new Core(initFile = "src/test/resources/basicopt1.data", memSize = 131072, memDelay = 4)).withAnnotations(TestBackend.annos) { c =>
       val maxCycles = sys.props.get("cpu.longRunMaxCycles").flatMap(v => scala.util.Try(v.toInt).toOption).getOrElse(2200000)
-      val sampleStride = sys.props.get("cpu.sampleStrideLong").flatMap(v => scala.util.Try(v.toInt).toOption).getOrElse(1024)
+      val sampleStride = sys.props.get("cpu.sampleStrideLong").flatMap(v => scala.util.Try(v.toInt).toOption).getOrElse(8192)
       val progressEvery = sys.props.get("cpu.progressEvery").flatMap(v => scala.util.Try(v.toInt).toOption).getOrElse(200000)
+      val quiet = sys.props.get("cpu.quiet").map(truthy).getOrElse(true)
       val noCommitLimit = sys.props.get("cpu.noCommitLimit").flatMap(v => scala.util.Try(v.toInt).toOption).getOrElse(120000)
       val maxStagnantPc = sys.props.get("cpu.maxStagnantPc").flatMap(v => scala.util.Try(v.toInt).toOption).getOrElse(12000)
       val loopWindow = sys.props.get("cpu.loopWindow").flatMap(v => scala.util.Try(v.toInt).toOption).getOrElse(64)
@@ -64,7 +65,7 @@ class BasicOpt1LongRun extends AnyFlatSpec with ChiselScalatestTester {
           cycles += stepNow
           haltedQuick = c.io.halted.peek().litToBoolean
 
-          if (progressEvery > 0 && cycles >= nextProgress) {
+          if (!quiet && progressEvery > 0 && cycles >= nextProgress) {
             val commitsNow = c.io.debug_commit_count.peek().litValue.toLong
             val pcNow = c.io.debug_pc.peek().litValue.toLong
             val wallSec = (System.nanoTime() - wallStartNs).toDouble / 1e9
@@ -149,7 +150,7 @@ class BasicOpt1LongRun extends AnyFlatSpec with ChiselScalatestTester {
           noCommitCycles += stepNow
         }
 
-        if (progressEvery > 0 && cycles >= nextProgress) {
+        if (!quiet && progressEvery > 0 && cycles >= nextProgress) {
           val ipc = commits.toDouble / math.max(1, cycles).toDouble
           val wallSec = (System.nanoTime() - wallStartNs).toDouble / 1e9
           val simKHz = if (wallSec > 0) cycles.toDouble / wallSec / 1000.0 else 0.0

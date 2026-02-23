@@ -16,13 +16,16 @@ class BulgarianLongRun extends AnyFlatSpec with ChiselScalatestTester {
     }
     test(new Core(initFile = "src/test/resources/bulgarian.data", memSize = 131072, memDelay = 4)).withAnnotations(TestBackend.annos) { c =>
       val maxCycles = sys.props.get("cpu.longRunMaxCycles").flatMap(v => scala.util.Try(v.toInt).toOption).getOrElse(1500000)
-      val sampleStride = sys.props.get("cpu.sampleStrideLong").flatMap(v => scala.util.Try(v.toInt).toOption).getOrElse(1024)
-      val progressEvery = sys.props.get("cpu.progressEvery").flatMap(v => scala.util.Try(v.toInt).toOption).getOrElse(50000)
+      val sampleStride = sys.props.get("cpu.sampleStrideLong").flatMap(v => scala.util.Try(v.toInt).toOption).getOrElse(8192)
+      val progressEvery = sys.props.get("cpu.progressEvery").flatMap(v => scala.util.Try(v.toInt).toOption).getOrElse(200000)
+      val quiet = sys.props.get("cpu.quiet").map(truthy).getOrElse(true)
       val noCommitLimit = sys.props.get("cpu.noCommitLimit").flatMap(v => scala.util.Try(v.toInt).toOption).getOrElse(120000)
       val maxStagnantPc = sys.props.get("cpu.maxStagnantPc").flatMap(v => scala.util.Try(v.toInt).toOption).getOrElse(120000)
       val loopWindow = sys.props.get("cpu.loopWindow").flatMap(v => scala.util.Try(v.toInt).toOption).getOrElse(64)
       val maxLoopRepeats = sys.props.get("cpu.maxLoopRepeats").flatMap(v => scala.util.Try(v.toInt).toOption).getOrElse(2000)
       val wallTimeoutSec = sys.props.get("cpu.wallTimeoutSec").flatMap(v => scala.util.Try(v.toInt).toOption).getOrElse(1200)
+      val quickMode = sys.props.get("cpu.quickMode").exists(truthy)
+      val quickChunk = sys.props.get("cpu.quickChunk").flatMap(v => scala.util.Try(v.toInt).toOption).getOrElse(65536)
       val stagnantSamplesLimit = math.max(8, maxStagnantPc / math.max(1, sampleStride))
       c.clock.setTimeout(maxCycles + 2000)
       val wallStartNs = System.nanoTime()
@@ -37,6 +40,44 @@ class BulgarianLongRun extends AnyFlatSpec with ChiselScalatestTester {
       var lastCommittedA0Cycle = 0
       var lastCommittedA0CommitCount = c.io.debug_commit_count.peek().litValue.toLong
       var seenExpectedA0 = lastCommittedA0 == 159L
+      if (quickMode) {
+        var haltedQuick = c.io.halted.peek().litToBoolean
+        while (cycles < maxCycles && !haltedQuick) {
+          if (Thread.currentThread().isInterrupted) {
+            fail(s"bulgarian quick aborted by interrupt at cycles=$cycles")
+          }
+          val wallSecNow = (System.nanoTime() - wallStartNs).toDouble / 1e9
+          if (wallTimeoutSec > 0 && wallSecNow >= wallTimeoutSec) {
+            val pcNow = c.io.debug_pc.peek().litValue.toLong
+            val commitsNow = c.io.debug_commit_count.peek().litValue.toLong
+            fail(f"bulgarian quick wall-time timeout: ${wallSecNow}%.1fs at cycles=$cycles%d commits=$commitsNow%d pc=0x$pcNow%08x")
+          }
+
+          val stepNow = math.min(math.max(1, quickChunk), maxCycles - cycles)
+          try {
+            c.clock.step(stepNow)
+          } catch {
+            case _: InterruptedException =>
+              fail(s"bulgarian quick interrupted during stepping at cycles=$cycles")
+            case t: Throwable if t.getMessage != null && t.getMessage.toLowerCase.contains("interrupted") =>
+              fail(s"bulgarian quick aborted: ${t.getMessage}")
+          }
+          cycles += stepNow
+          haltedQuick = c.io.halted.peek().litToBoolean
+
+          val a0Now = c.io.debug_reg_a0.peek().litValue.toLong & 0xffffffffL
+          if (a0Now == 159L) seenExpectedA0 = true
+
+          if (!quiet && progressEvery > 0 && cycles >= nextProgress) {
+            val commitsNow = c.io.debug_commit_count.peek().litValue.toLong
+            val pcNow = c.io.debug_pc.peek().litValue.toLong
+            val wallSec = (System.nanoTime() - wallStartNs).toDouble / 1e9
+            val simKHz = if (wallSec > 0) cycles.toDouble / wallSec / 1000.0 else 0.0
+            println(f"[bulgarian-quick] cycles=$cycles%d commits=$commitsNow%d pc=0x$pcNow%08x wall=${wallSec}%.1fs sim=${simKHz}%.1f kHz")
+            while (nextProgress <= cycles) nextProgress += progressEvery
+          }
+        }
+      } else {
       while (cycles < maxCycles && !c.io.halted.peek().litToBoolean) {
         if (Thread.currentThread().isInterrupted) {
           fail(s"bulgarian aborted by interrupt at cycles=$cycles commits=${c.io.debug_commit_count.peek().litValue}")
@@ -97,7 +138,7 @@ class BulgarianLongRun extends AnyFlatSpec with ChiselScalatestTester {
         if (noCommitCycles >= noCommitLimit) {
           fail(f"bulgarian early-stop: no commit for $noCommitCycles%d cycles at pc=0x${pc.toLong}%08x")
         }
-        if (progressEvery > 0 && cycles >= nextProgress) {
+        if (!quiet && progressEvery > 0 && cycles >= nextProgress) {
           val ipc = commitsAfter.toDouble / math.max(1, cycles).toDouble
           val wallSec = (System.nanoTime() - wallStartNs).toDouble / 1e9
           val simKHz = if (wallSec > 0) cycles.toDouble / wallSec / 1000.0 else 0.0
@@ -106,6 +147,7 @@ class BulgarianLongRun extends AnyFlatSpec with ChiselScalatestTester {
             nextProgress += progressEvery
           }
         }
+      }
       }
       val halted = c.io.halted.peek().litToBoolean
       val commits = c.io.debug_commit_count.peek().litValue.toLong

@@ -4,10 +4,22 @@
 .scala-build/
 .idea/
 .vscode/
+*.iml
+
+# sbt/chisel build outputs
 target
 project
 test_run_dir
 project/**/target/
+out/
+dist/
+build/
+
+# runtime / crash logs
+nohup.out
+*.out
+*.pid
+hs_err_pid*
 
 *.txt
 *.py
@@ -25,5 +37,7 @@ src/test/resources/*.dump
 .DS_Store
 Thumbs.db
 
+possibleproblem.md
 read.md
 tmp*
+verilator/
